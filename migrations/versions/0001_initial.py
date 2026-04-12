@@ -19,17 +19,44 @@ depends_on: str | None = None
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
 
-    case_status = postgresql.ENUM("parsed", "rejected", name="case_status", create_type=True)
-    creative_status = postgresql.ENUM(
-        "pending_approval", "approved", "rejected", name="creative_status", create_type=True
+    # Postgres has no "CREATE TYPE IF NOT EXISTS". SQLAlchemy's checkfirst=
+    # sometimes mis-detects on half-applied migrations, so we use the canonical
+    # DO block + EXCEPTION pattern instead. This lets the migration recover
+    # after a partial failure without needing a db-nuke.
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE case_status AS ENUM ('parsed', 'rejected');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE creative_status AS ENUM ('pending_approval', 'approved', 'rejected');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE campaign_status AS ENUM ('deploying', 'active', 'paused', 'complete', 'failed');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """)
+
+    # Bind `postgresql.ENUM(..., create_type=False)` to column defs. Using
+    # generic `sa.Enum(create_type=False)` silently ignores `create_type`
+    # and triggers a CREATE TYPE during `op.create_table`, conflicting with
+    # the DO blocks above. The Postgres-specific type honors the flag.
+    case_status_t = postgresql.ENUM(
+        "parsed", "rejected", name="case_status", create_type=False
     )
-    campaign_status = postgresql.ENUM(
+    creative_status_t = postgresql.ENUM(
+        "pending_approval", "approved", "rejected",
+        name="creative_status", create_type=False,
+    )
+    campaign_status_t = postgresql.ENUM(
         "deploying", "active", "paused", "complete", "failed",
-        name="campaign_status", create_type=True,
+        name="campaign_status", create_type=False,
     )
-    case_status.create(op.get_bind(), checkfirst=True)
-    creative_status.create(op.get_bind(), checkfirst=True)
-    campaign_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "cases",
@@ -49,7 +76,7 @@ def upgrade() -> None:
         sa.Column("citations", postgresql.JSONB, nullable=False, server_default="{}"),
         sa.Column(
             "status",
-            sa.Enum("parsed", "rejected", name="case_status", create_type=False),
+            case_status_t,
             nullable=False,
             server_default="parsed",
         ),
@@ -103,10 +130,7 @@ def upgrade() -> None:
         sa.Column("policy_check", postgresql.JSONB, nullable=False, server_default="{}"),
         sa.Column(
             "status",
-            sa.Enum(
-                "pending_approval", "approved", "rejected",
-                name="creative_status", create_type=False,
-            ),
+            creative_status_t,
             nullable=False,
             server_default="pending_approval",
         ),
@@ -141,10 +165,7 @@ def upgrade() -> None:
         sa.Column("daily_budget_cents", sa.Integer, nullable=False, server_default="5000"),
         sa.Column(
             "status",
-            sa.Enum(
-                "deploying", "active", "paused", "complete", "failed",
-                name="campaign_status", create_type=False,
-            ),
+            campaign_status_t,
             nullable=False,
             server_default="deploying",
         ),

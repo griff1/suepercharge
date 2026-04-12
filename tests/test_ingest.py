@@ -85,8 +85,12 @@ def test_missing_citation_for_non_null_field_rejected() -> None:
     assert "class_period_start" in reason  # first missing field reported
 
 
-def test_wrong_offsets_rejected() -> None:
-    # Quote matches, but offsets point at wrong region.
+def test_wrong_offsets_but_verbatim_quote_accepted() -> None:
+    """Claude miscounts offsets all the time but surfaces real quotes.
+
+    We tolerate the offset mismatch as long as the quote appears verbatim
+    somewhere in the source — we're protecting against hallucinated FACTS,
+    not against LLM arithmetic errors."""
     parsed = _parsed(
         title="Acme Class Action Settlement",
         defendants=["Acme Inc."],
@@ -97,12 +101,12 @@ def test_wrong_offsets_rejected() -> None:
         deadline=None,
         citations=[
             _cite("title", "Acme Inc. has agreed to a class action settlement"),
+            # Quote is a verbatim substring of SOURCE, but offsets are wrong.
             Citation(field="defendants", quote="Acme Inc.", start_offset=0, end_offset=5),
         ],
     )
     ok, reason = validate_citations(parsed, SOURCE)
-    assert not ok
-    assert "defendants" in reason
+    assert ok, reason
 
 
 def test_null_fields_need_no_citation() -> None:
@@ -121,6 +125,39 @@ def test_null_fields_need_no_citation() -> None:
         ],
     )
     ok, reason = validate_citations(parsed, SOURCE)
+    assert ok, reason
+
+
+def test_unicode_and_whitespace_drift_accepted() -> None:
+    """Claude regurgitates quotes with normalized Unicode — straight quotes
+    instead of curly, regular spaces instead of nbsp, hyphen instead of
+    en-dash. Our validator should tolerate these since the facts are real."""
+    # Source has curly quotes, non-breaking space, and an en-dash.
+    nbsp_source = (
+        "Acme Inc.\u00a0has agreed to a class action settlement. "
+        "The period runs January 1, 2020 \u2013 December 31, 2022. "
+        "Claimants may receive \u201cup to $500\u201d. Deadline: March 15, 2027."
+    )
+    parsed = _parsed(
+        title="Acme Class Action",
+        defendants=["Acme Inc."],
+        class_period_start=None,
+        class_period_end=None,
+        est_payout_low=None,
+        est_payout_high=None,
+        deadline=None,
+        citations=[
+            # Claude returned normalized versions (ascii space, hyphen, straight quote).
+            Citation(
+                field="title",
+                quote="Acme Inc. has agreed to a class action settlement",
+                start_offset=0,
+                end_offset=50,
+            ),
+            Citation(field="defendants", quote="Acme Inc.", start_offset=0, end_offset=9),
+        ],
+    )
+    ok, reason = validate_citations(parsed, nbsp_source)
     assert ok, reason
 
 
