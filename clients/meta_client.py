@@ -484,7 +484,7 @@ def build_lead_form_for_case(
     return create_lead_form(
         name=name[:95],  # Meta form-name limit is 95 chars
         privacy_policy_url=privacy_policy_url,
-        intro_headline=case_title[:80],
+        intro_headline=case_title[:60],  # Meta caps context_card.title at 60 chars
         intro_description=case_summary[:1000],
         fields=default_fields_for_case(qualifying_question),
         consent_text=compliance.consent_text(),
