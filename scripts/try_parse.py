@@ -127,13 +127,13 @@ def main() -> int:
 
     print("[2/?] parsing with Claude…", file=sys.stderr)
     parsed = parse_case(text)
-    ok, reason = validate_citations(parsed, text)
+    ok, reason, _errors = validate_citations(parsed, text)
 
     icp = None
     variants: list = []
     if args.with_icp and parsed.is_viable_class_action and ok:
         print("[3/?] generating ICP…", file=sys.stderr)
-        icp = build_icp(parsed)
+        icp = build_icp(parsed, source_text=text)
 
     if args.with_copy and icp is not None:
         print("[4/?] generating 3 copy variants (informative / empathetic / urgent)…", file=sys.stderr)

@@ -388,13 +388,13 @@ def get_campaign_insights(campaign_id: str) -> dict[str, Any]:
         return {}
     data = insights[0].export_all_data()
     # Flatten lead-related actions into a top-level count for the monitor log.
+    import contextlib
+
     lead_count = 0
     for action in data.get("actions", []) or []:
         if action.get("action_type") in ("lead", "leadgen.other", "onsite_conversion.lead_grouped"):
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 lead_count += int(action.get("value", 0))
-            except (TypeError, ValueError):
-                pass
     data["leads"] = lead_count
     return data
 

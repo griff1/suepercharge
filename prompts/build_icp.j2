@@ -1,27 +1,39 @@
 You are building the Ideal Customer Profile (ICP) for a Meta ad campaign
 targeting people who could be plaintiffs in the following class action.
 
-CRITICAL CONSTRAINT: Meta restricts narrow demographic targeting for ads in
-regulated categories (legal, housing, credit, employment). Your ICP therefore
-informs the CREATIVE (tone, imagery, pain points, language) — NOT the Meta
-targeting parameters. Put narrow descriptors in `psychographics` and
-`targeting_hints`, never in `demographics` if they touch protected classes
-(race, religion, national origin, sexual orientation, disability).
-
 Return ONE GeneratedICP object via the provided tool.
 
-Fields to populate:
-- `demographics`: { "age_range": "25-44", "gender": "any|female|male",
-  "geography": "<state/region from the case>", "income_bracket": "<if implied>" }
-- `psychographics`: interests, lifestyle cues, where they spend time online,
-  what content resonates (e.g. "parenting groups", "budget-conscious shoppers",
-  "early-adopter tech consumers").
-- `targeting_hints`: free-form prose hints the creative agent should echo in
-  copy. Not Meta API fields.
-- `disqualifiers`: attributes that would exclude someone from this case
-  (e.g. "purchased after {{ case.class_period_end }}", "outside {{ case.geography }}").
+CRITICAL CONTEXT: These cases are SECURITIES FRAUD class actions. The
+plaintiffs are INVESTORS who bought stock and lost money because the company
+lied or withheld information. They are NOT consumers who used a product.
 
-Case context:
+YOUR MOST IMPORTANT JOB: Make this ICP SPECIFIC to THIS case. Read the source
+article carefully and pull out the unique details that distinguish this case:
+- What industry is the company in? Target investors interested in THAT industry.
+- What specifically did the company lie about? The hook should reference THAT.
+- Was there an IPO, a bankruptcy, criminal charges, a product failure, margin
+  erosion, social media fraud? Use THOSE details in the angle.
+- Who specifically bought this stock? Retail traders? IPO investors? Penny stock
+  followers? Institutional? The demographics should reflect THAT audience.
+
+DO NOT produce generic "age 25-44, likes finance" profiles. Every field should
+contain details that could ONLY apply to THIS specific case.
+
+Keep every field value SHORT — 10 to 15 words max per entry.
+Use plain, specific language. No filler.
+
+Fields to populate:
+- `demographics`: { "age_range": "...", "gender": "...", "location": "...",
+  "income": "...", "investor_type": "..." }
+- `psychographics`: { "interests": "...", "online_habits": "...",
+  "pain_points": "...", "media_diet": "..." }
+  Each value must reference THIS case's industry, company, or situation.
+- `targeting_hints`: { "hook": "...", "tone": "...", "angle": "..." }
+  The hook MUST mention the company name or the specific fraud.
+  The angle MUST reference what actually happened (not generic "protect investments").
+- `disqualifiers`: { "timing": "...", "geography": "...", "other": "..." }
+
+Case summary:
 Title: {{ case.title }}
 Defendants: {{ case.defendants | join(", ") }}
 Product: {{ case.product or "n/a" }}
@@ -30,3 +42,6 @@ Class period: {{ case.class_period_start or "?" }} to {{ case.class_period_end o
 Geography: {{ case.geography or "n/a" }}
 Payout range per claimant: ${{ case.est_payout_low or "?" }} - ${{ case.est_payout_high or "?" }}
 Deadline: {{ case.deadline or "n/a" }}
+
+Source article (read this for case-specific details):
+{{ source_text }}
