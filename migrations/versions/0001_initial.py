@@ -81,6 +81,7 @@ def upgrade() -> None:
             server_default="parsed",
         ),
         sa.Column("reject_reason", sa.String),
+        sa.Column("law_firm_contact", postgresql.JSONB, nullable=False, server_default="{}"),
         sa.Column("model_version", sa.String),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )

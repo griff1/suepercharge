@@ -29,6 +29,7 @@ def get_ready_cases() -> list[dict]:
             "payout_low": case.est_payout_low,
             "payout_high": case.est_payout_high,
             "source_url": case.pr_newswire_url,
+            "law_firm_contact": case.law_firm_contact,
             "demographics": icp.demographics,
             "psychographics": icp.psychographics,
             "targeting_hints": icp.targeting_hints,

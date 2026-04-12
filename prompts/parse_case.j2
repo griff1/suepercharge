@@ -21,6 +21,14 @@ Rules:
 6. Dates must be ISO format (YYYY-MM-DD). If only a month is given, use the
    first of that month.
 7. Leave `citations` as an empty list.
+8. EXTRACT LAW FIRM CONTACT INFO from the article:
+   - `law_firm`: the plaintiff law firm name (e.g. "The Rosen Law Firm, P.A.")
+   - `lawyer_names`: list of individual lawyer names (e.g. ["Laurence Rosen", "Phillip Kim"])
+   - `firm_phone`: phone number including area code (e.g. "(212) 686-1060")
+   - `firm_email`: email address (e.g. "lrosen@rosenlegal.com")
+   - `firm_address`: full mailing address
+   If ANY of these are not found in the text, set that field to "unknown".
+   For lawyer_names, return an empty list if none found.
 
 Source document:
 {{ source_text }}

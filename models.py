@@ -100,6 +100,7 @@ class Case(Base):
         Enum(CaseStatus, name="case_status"), default=CaseStatus.parsed, nullable=False, index=True
     )
     reject_reason: Mapped[str | None] = mapped_column(String)
+    law_firm_contact: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     model_version: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -276,6 +277,11 @@ class ParsedCase(BaseModel):
     )
     reject_reason: str | None = None
     citations: list[Citation] = Field(default_factory=list)
+    law_firm: str = Field(default="unknown", description="Name of the plaintiff law firm")
+    lawyer_names: list[str] = Field(default_factory=list, description="Names of individual lawyers")
+    firm_phone: str = Field(default="unknown", description="Law firm phone number")
+    firm_email: str = Field(default="unknown", description="Law firm email address")
+    firm_address: str = Field(default="unknown", description="Law firm physical address")
 
 
 class GeneratedICP(BaseModel):

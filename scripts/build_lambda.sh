@@ -25,7 +25,7 @@ docker run --rm --platform linux/arm64 \
   bash -c "pip install --target=/build/package -r /build/requirements.txt"
 
 echo "[build_lambda] Adding source..."
-cp -R "$ROOT"/{agents,clients,prompts,compliance.py,db.py,models.py} "$BUILD_DIR/package/"
+cp -R "$ROOT"/{agents,clients,prompts,compliance.py,db.py,models.py,storage.py,handoff.py,load_env.py} "$BUILD_DIR/package/"
 
 echo "[build_lambda] Zipping -> $OUT_ZIP"
 (cd "$BUILD_DIR/package" && zip -qr "$OUT_ZIP" .)

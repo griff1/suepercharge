@@ -452,6 +452,13 @@ def _persist_case_and_icp(
             deadline=parsed.deadline,
             raw_s3_key=raw_s3_key,
             citations={"citations": [c.model_dump() for c in parsed.citations]},
+            law_firm_contact={
+                "firm": parsed.law_firm or "unknown",
+                "lawyers": parsed.lawyer_names or [],
+                "phone": parsed.firm_phone or "unknown",
+                "email": parsed.firm_email or "unknown",
+                "address": parsed.firm_address or "unknown",
+            },
             status=CaseStatus.parsed,
             model_version=PARSE_MODEL,
         )
@@ -657,6 +664,14 @@ def run_once(feed_urls: str | None = None) -> IngestResult:
                     )
                     result.rejected += 1
                     continue
+
+            log.info("         firm: %s", parsed.law_firm)
+            if parsed.lawyer_names:
+                log.info("         lawyers: %s", ", ".join(parsed.lawyer_names))
+            if parsed.firm_email != "unknown":
+                log.info("         email: %s", parsed.firm_email)
+            if parsed.firm_phone != "unknown":
+                log.info("         phone: %s", parsed.firm_phone)
 
             log.info("         generating ICP...")
             icp = build_icp(parsed, source_text=text)

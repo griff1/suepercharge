@@ -1,14 +1,14 @@
 ########################################################################
-# Suepercharge MVP — AWS footprint
+# Suepercharge MVP — AWS footprint (ingest agent only)
 #
-# Four services (per plan §2):
-#   1. Lambda    — 3 agents + 1 Meta lead webhook handler
+# Three services:
+#   1. Lambda    — ingest agent
 #   2. RDS       — single t4g.micro Postgres, single-AZ
-#   3. S3        — raw press releases + generated creative assets
-#   4. EventBridge Scheduler — cron triggers for each agent
+#   3. S3        — raw press releases
+#   4. EventBridge Scheduler — 15-minute cron for ingest
 #
-# We deliberately do NOT provision Secrets Manager, API Gateway, VPC
-# endpoints, DynamoDB, or Step Functions. Upgrade when revenue justifies it.
+# Lambda is NOT in VPC. RDS is publicly accessible (dev) with password
+# + SSL. When we add creative/campaign agents, add VPC + NAT gateway.
 ########################################################################
 
 locals {
@@ -68,7 +68,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 }
 
 ########################################################################
-# Networking — default VPC + default subnets for RDS (MVP simplicity)
+# Networking — default VPC for RDS only (Lambda is outside VPC)
 ########################################################################
 
 data "aws_vpc" "default" {
@@ -89,29 +89,16 @@ resource "aws_db_subnet_group" "rds" {
 
 resource "aws_security_group" "rds" {
   name        = "${local.name_prefix}-rds"
-  description = "Allow Lambda -> RDS 5432"
+  description = "RDS access — publicly accessible for dev (password + SSL)"
   vpc_id      = data.aws_vpc.default.id
-}
 
-resource "aws_security_group" "lambda" {
-  name        = "${local.name_prefix}-lambda"
-  description = "Lambda egress to RDS + internet (via NAT in default VPC)"
-  vpc_id      = data.aws_vpc.default.id
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+  ingress {
+    description = "Postgres from anywhere (dev: protected by password + SSL)"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-}
-
-resource "aws_security_group_rule" "rds_from_lambda" {
-  type                     = "ingress"
-  from_port                = 5432
-  to_port                  = 5432
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.rds.id
-  source_security_group_id = aws_security_group.lambda.id
 }
 
 ########################################################################
@@ -129,7 +116,7 @@ resource "aws_db_instance" "main" {
   db_name                 = "suepercharge"
   username                = "postgres"
   password                = var.db_password
-  publicly_accessible     = false
+  publicly_accessible     = true
   multi_az                = false
   db_subnet_group_name    = aws_db_subnet_group.rds.name
   vpc_security_group_ids  = [aws_security_group.rds.id]
@@ -143,7 +130,7 @@ locals {
 }
 
 ########################################################################
-# IAM for Lambdas
+# IAM for Lambda
 ########################################################################
 
 data "aws_iam_policy_document" "lambda_assume" {
@@ -166,11 +153,6 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_vpc" {
-  role       = aws_iam_role.lambda.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
 data "aws_iam_policy_document" "lambda_s3" {
   statement {
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
@@ -189,84 +171,31 @@ resource "aws_iam_role_policy" "lambda_s3" {
 }
 
 ########################################################################
-# Lambda — shared deployment package, four functions
+# Lambda — ingest agent
 ########################################################################
 
-locals {
-  common_env = {
-    DATABASE_URL              = local.database_url
-    S3_BUCKET                 = aws_s3_bucket.artifacts.bucket
-    ANTHROPIC_API_KEY         = var.anthropic_api_key
-    IDEOGRAM_API_KEY          = var.ideogram_api_key
-    ARCADS_API_KEY            = var.arcads_api_key
-    META_APP_ID               = var.meta_app_id
-    META_APP_SECRET           = var.meta_app_secret
-    META_ACCESS_TOKEN         = var.meta_access_token
-    META_AD_ACCOUNT_ID        = var.meta_ad_account_id
-    META_PAGE_ID              = var.meta_page_id
-    META_WEBHOOK_VERIFY_TOKEN = var.meta_webhook_verify_token
-    SLACK_BOT_TOKEN           = var.slack_bot_token
-    SLACK_CHANNEL_ID          = var.slack_channel_id
-    SLACK_SIGNING_SECRET      = var.slack_signing_secret
-  }
-
-  # Each function => (handler, timeout_s, memory_mb)
-  functions = {
-    ingest = {
-      handler = "agents.ingest.handler"
-      timeout = 300
-      memory  = 512
-    }
-    creative = {
-      handler = "agents.creative.handler"
-      timeout = 600
-      memory  = 1024
-    }
-    campaign = {
-      handler = "agents.campaign.handler"
-      timeout = 300
-      memory  = 512
-    }
-    webhook = {
-      handler = "agents.campaign.webhook_handler"
-      timeout = 30
-      memory  = 256
-    }
-  }
-}
-
-resource "aws_lambda_function" "agents" {
-  for_each = local.functions
-
-  function_name    = "${local.name_prefix}-${each.key}"
+resource "aws_lambda_function" "ingest" {
+  function_name    = "${local.name_prefix}-ingest"
   role             = aws_iam_role.lambda.arn
   runtime          = "python3.12"
   architectures    = ["arm64"]
-  handler          = each.value.handler
-  timeout          = each.value.timeout
-  memory_size      = each.value.memory
+  handler          = "agents.ingest.handler"
+  timeout          = 300
+  memory_size      = 512
   filename         = var.lambda_package_path
   source_code_hash = filebase64sha256(var.lambda_package_path)
 
-  vpc_config {
-    subnet_ids         = data.aws_subnets.default.ids
-    security_group_ids = [aws_security_group.lambda.id]
-  }
-
   environment {
-    variables = local.common_env
+    variables = {
+      DATABASE_URL      = local.database_url
+      S3_BUCKET         = aws_s3_bucket.artifacts.bucket
+      ANTHROPIC_API_KEY = var.anthropic_api_key
+    }
   }
-}
-
-# Public HTTPS endpoint for the Meta lead webhook. Function URL = zero-config
-# alternative to API Gateway, per plan §2.
-resource "aws_lambda_function_url" "webhook" {
-  function_name      = aws_lambda_function.agents["webhook"].function_name
-  authorization_type = "NONE"
 }
 
 ########################################################################
-# EventBridge Scheduler — cron triggers
+# EventBridge Scheduler — ingest every 15 minutes
 ########################################################################
 
 resource "aws_iam_role" "scheduler" {
@@ -289,29 +218,19 @@ resource "aws_iam_role_policy" "scheduler_invoke" {
     Statement = [{
       Effect   = "Allow"
       Action   = "lambda:InvokeFunction"
-      Resource = [for f in aws_lambda_function.agents : f.arn if f.function_name != aws_lambda_function.agents["webhook"].function_name]
+      Resource = aws_lambda_function.ingest.arn
     }]
   })
 }
 
-locals {
-  schedules = {
-    ingest   = "rate(15 minutes)"
-    creative = "rate(5 minutes)"
-    campaign = "rate(15 minutes)"
-  }
-}
-
-resource "aws_scheduler_schedule" "agents" {
-  for_each = local.schedules
-
-  name                         = "${local.name_prefix}-${each.key}"
-  schedule_expression          = each.value
+resource "aws_scheduler_schedule" "ingest" {
+  name                         = "${local.name_prefix}-ingest"
+  schedule_expression          = "rate(15 minutes)"
   schedule_expression_timezone = "UTC"
   flexible_time_window { mode = "OFF" }
 
   target {
-    arn      = aws_lambda_function.agents[each.key].arn
+    arn      = aws_lambda_function.ingest.arn
     role_arn = aws_iam_role.scheduler.arn
     input    = jsonencode({ source = "scheduler" })
   }
@@ -330,11 +249,10 @@ output "rds_endpoint" {
   sensitive = true
 }
 
-output "meta_webhook_url" {
-  description = "Public HTTPS URL to register with Meta as the lead webhook callback."
-  value       = aws_lambda_function_url.webhook.function_url
+output "rds_security_group_id" {
+  value = aws_security_group.rds.id
 }
 
-output "lambda_names" {
-  value = { for k, f in aws_lambda_function.agents : k => f.function_name }
+output "lambda_name" {
+  value = aws_lambda_function.ingest.function_name
 }
