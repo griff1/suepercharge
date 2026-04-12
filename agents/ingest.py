@@ -569,20 +569,32 @@ def run_once(feed_urls: str | None = None) -> IngestResult:
 
     # ClassAction.org and SEC entries skip keyword filter — they're already relevant.
     candidates: list[FeedEntry] = []
-    skipped_keyword = 0
+    keyword_skipped: list[FeedEntry] = []
     for e in entries:
         if "classaction.org" in e.url or "sec.gov" in e.url:
-            candidates.append(e)  # pre-qualified
+            candidates.append(e)  # pre-qualified source
         elif looks_like_class_action(e):
             candidates.append(e)
         else:
-            skipped_keyword += 1
+            keyword_skipped.append(e)
+    skipped_keyword = len(keyword_skipped)
 
     existing = _already_ingested([e.url for e in candidates])
     new = [e for e in candidates if e.url not in existing]
     log.info("  Candidates:      %d", len(candidates))
     log.info("  Already seen:    %d", len(existing))
     log.info("  New to process:  %d", len(new))
+
+    # Per-entry skip explanations. INFO level — these are short and useful
+    # when tuning the keyword filter or debugging "why didn't this land?".
+    if keyword_skipped:
+        log.info("  --- skipped (no class-action keyword) ---")
+        for e in keyword_skipped:
+            log.info("    • %s", e.title[:100])
+    if existing:
+        log.info("  --- skipped (already in DB) ---")
+        for url in sorted(existing):
+            log.info("    • %s", _short_url(url))
     log.info("-" * 60)
 
     result = IngestResult(
@@ -660,9 +672,13 @@ def run_once(feed_urls: str | None = None) -> IngestResult:
 
     log.info("")
     log.info("=" * 60)
-    log.info("  RESULTS  parsed=%d  rejected=%d  errored=%d  skipped=%d",
-             result.parsed, result.rejected, result.errored,
-             result.skipped_existing + result.skipped_keyword)
+    log.info(
+        "  RESULTS  parsed=%d  rejected=%d  errored=%d  "
+        "skipped=%d (keyword=%d, already_seen=%d)",
+        result.parsed, result.rejected, result.errored,
+        result.skipped_existing + result.skipped_keyword,
+        result.skipped_keyword, result.skipped_existing,
+    )
     log.info("=" * 60)
     return result
 
