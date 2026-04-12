@@ -13,6 +13,63 @@ uv run pytest -q              # unit tests (no network)
 uv run ruff check .           # lint
 ```
 
+## Local-dev loop (no AWS, no Meta, no Slack, no Ideogram, no Arcads)
+
+The only paid service you need is **Anthropic** — all the others have stubs.
+
+```sh
+cp .env.local.example .env    # sets STORAGE_BACKEND=local + LOCAL_STUB_* flags
+# then edit .env and paste your ANTHROPIC_API_KEY
+
+make install                  # uv sync
+make db-up                    # docker postgres
+make migrate                  # create tables
+make test                     # 46 unit tests
+
+# Exercise one prompt without touching the DB:
+make parse URL=https://www.prnewswire.com/news-releases/some-class-action.html
+make parse-with-icp URL=...   # also runs the ICP generator
+
+# Full pipeline locally, end-to-end:
+make demo                     # seed synthetic case → creative → campaign → fake lead
+# Look in .local-storage/ for generated PNG; .local-approvals/ for the Slack message;
+# psql into localhost:5432 to see Case/Creative/Campaign/Lead rows.
+```
+
+### Stub modes
+
+Every expensive client checks for its key, falling back to a stub when the key is missing (or when `LOCAL_STUB_<NAME>=1` is set).
+
+| Service | Env flag | Stub behavior |
+|---|---|---|
+| S3 | `STORAGE_BACKEND=local` | Reads/writes under `.local-storage/<bucket>/` |
+| Ideogram | `LOCAL_STUB_IMAGE=1` or no `IDEOGRAM_API_KEY` | Returns a 1×1 placeholder PNG |
+| Arcads | `LOCAL_STUB_VIDEO=1` or no `ARCADS_API_KEY` | `submit_video` returns `stub-job-…`; `get_video` returns `completed` |
+| Slack | `LOCAL_STUB_SLACK=1/reject/manual` or no `SLACK_BOT_TOKEN` | Writes `.local-approvals/<ts>.json`. `1`/unset auto-approves, `reject` auto-rejects, `manual` waits for a `<ts>.reaction` sidecar (created by `scripts/approve.py`) |
+| Meta | `LOCAL_STUB_META=1` or no `META_ACCESS_TOKEN` | `deploy_lead_campaign` returns `local-camp-…`; `fetch_lead` reads `.local-leads/<id>.json` (or returns a default lead) |
+
+Turn off any one stub to hit that specific real API — keep the rest stubbed.
+
+### Manual approval workflow
+
+```sh
+# Boot with LOCAL_STUB_SLACK=manual in .env
+make creative                 # posts the creative to .local-approvals/<ts>.json
+make approve                  # list pending; shows the headline/body/image path
+scripts/approve.py --approve <ts>   # (or --approve all, or --reject <ts>)
+make creative                 # next tick — flips status to approved
+make campaign                 # deploys (stub Meta, real deploy logs to console)
+```
+
+### Dry-run scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/try_parse.py <url> [--with-icp]` | Run one press release through Claude, print parsed case + citation validation |
+| `scripts/seed_case.py` | Insert a synthetic Case + ICP into local Postgres |
+| `scripts/simulate_lead.py` | Sign a fake Meta webhook and invoke the handler directly |
+| `scripts/approve.py` | List/approve/reject local creative approvals |
+
 ## What's built
 
 - 5-table Postgres schema with pgcrypto-ready PII columns

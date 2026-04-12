@@ -21,14 +21,13 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Any
 
-import boto3
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
+import storage
 from clients.anthropic_client import structured
 from db import session
 from models import (
@@ -77,10 +76,6 @@ class FeedEntry:
 
 
 # ---------- External IO ----------
-
-
-def _s3() -> Any:
-    return boto3.client("s3")
 
 
 def fetch_feed(feed_url: str = DEFAULT_FEED_URL) -> list[FeedEntry]:
@@ -137,17 +132,13 @@ def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
     return "\n".join(lines)
 
 
-def upload_raw_to_s3(body: str, url: str) -> str:
-    """Store the raw extracted text in S3. Key: raw/<uuid>.txt."""
-    bucket = os.environ["S3_BUCKET"]
+def upload_raw(body: str, _source_url: str) -> str:
+    """Store the raw extracted text. Key: raw/<uuid>.txt.
+
+    Goes to S3 in prod, local filesystem in dev (see storage.py).
+    """
     key = f"raw/{uuid.uuid4()}.txt"
-    _s3().put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=body.encode("utf-8"),
-        ContentType="text/plain; charset=utf-8",
-        Metadata={"source_url": url[:1024]},
-    )
+    storage.put_text(key, body)
     return key
 
 
@@ -332,7 +323,7 @@ def run_once(feed_url: str = DEFAULT_FEED_URL) -> IngestResult:
                 result.rejected += 1
                 continue
 
-            s3_key = upload_raw_to_s3(text, entry.url)
+            s3_key = upload_raw(text, entry.url)
             parsed = parse_case(text)
 
             if not parsed.is_viable_class_action:

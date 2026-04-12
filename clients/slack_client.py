@@ -14,14 +14,42 @@ interval.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 APPROVE_EMOJI = "+1"
 REJECT_EMOJI = "-1"
+
+log = logging.getLogger(__name__)
+
+# Stub mode:
+#   LOCAL_STUB_SLACK=1          → write a JSON file per approval, auto-approve on poll
+#   LOCAL_STUB_SLACK=reject     → auto-reject on poll instead
+#   LOCAL_STUB_SLACK=manual     → write approval files, read ./.local-approvals/<ts>.reaction
+#                                 ("approve" or "reject"); leaves creatives pending until
+#                                 the user writes the file
+# Unset AND no SLACK_BOT_TOKEN → same as LOCAL_STUB_SLACK=1 (auto-approve).
+
+def _approval_dir() -> Path:
+    return Path(os.environ.get("LOCAL_APPROVAL_DIR", ".local-approvals"))
+
+
+def _stub_mode() -> str | None:
+    val = os.environ.get("LOCAL_STUB_SLACK")
+    if val in {"1", "true", "yes"}:
+        return "approve"
+    if val in {"reject", "approve", "manual"}:
+        return val
+    if not os.environ.get("SLACK_BOT_TOKEN"):
+        return "approve"
+    return None
 
 
 def _token() -> str:
@@ -49,7 +77,33 @@ def post_creative_for_approval(
     *, headline: str, primary_text: str, cta: str, image_url: str | None, video_url: str | None,
     case_title: str, case_url: str,
 ) -> str:
-    """Post the creative to Slack with 👍/👎 reactions seeded. Returns the message ts."""
+    """Post the creative to Slack with 👍/👎 reactions seeded. Returns the message ts.
+
+    In stub mode (no Slack token, or LOCAL_STUB_SLACK set): writes a JSON file
+    to `.local-approvals/<ts>.json` describing the creative, and returns a
+    deterministic ts. The paired `get_human_reactions` either auto-resolves
+    or reads a `.reaction` sibling file."""
+    mode = _stub_mode()
+    if mode is not None:
+        ts = f"local-{uuid.uuid4().hex[:12]}"
+        adir = _approval_dir()
+        adir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": ts,
+            "mode": mode,
+            "case_title": case_title,
+            "case_url": case_url,
+            "headline": headline,
+            "primary_text": primary_text,
+            "cta": cta,
+            "image_url": image_url,
+            "video_url": video_url,
+        }
+        (adir / f"{ts}.json").write_text(json.dumps(payload, indent=2))
+        log.info("[stub:slack] wrote approval request %s (mode=%s) to %s",
+                 ts, mode, adir)
+        return ts
+
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
@@ -115,6 +169,10 @@ class ReactionResult:
 
 def get_human_reactions(message_ts: str, bot_user_id: str | None = None) -> ReactionResult:
     """Return the non-bot users who have reacted 👍/👎 to `message_ts`."""
+    # Stub: read a sidecar .reaction file, or resolve based on mode.
+    if message_ts.startswith("local-") or _stub_mode() is not None:
+        return _stub_reactions(message_ts)
+
     with _client() as c:
         r = c.get(
             "/reactions.get",
@@ -137,9 +195,35 @@ def get_human_reactions(message_ts: str, bot_user_id: str | None = None) -> Reac
     return ReactionResult(approve_users=approve, reject_users=reject)
 
 
+def _stub_reactions(message_ts: str) -> ReactionResult:
+    """Resolve a local approval request based on mode.
+
+    - `approve` / unset / no token → auto-approve on first poll.
+    - `reject`                     → auto-reject.
+    - `manual` → look for `<ts>.reaction` sidecar containing "approve" or
+      "reject"; otherwise return empty (leave pending)."""
+    mode = _stub_mode() or "approve"
+    if mode == "reject":
+        return ReactionResult(approve_users=[], reject_users=["local-stub"])
+    if mode == "manual":
+        path = _approval_dir() / f"{message_ts}.reaction"
+        if not path.exists():
+            return ReactionResult(approve_users=[], reject_users=[])
+        verdict = path.read_text().strip().lower()
+        if verdict == "approve":
+            return ReactionResult(approve_users=["local-manual"], reject_users=[])
+        if verdict == "reject":
+            return ReactionResult(approve_users=[], reject_users=["local-manual"])
+        return ReactionResult(approve_users=[], reject_users=[])
+    # approve (default)
+    return ReactionResult(approve_users=["local-stub"], reject_users=[])
+
+
 def bot_user_id() -> str | None:
     """Cached-per-invocation lookup of our own bot user id so we ignore our
     seeded reactions. Returns None on failure (agents should still work)."""
+    if _stub_mode() is not None:
+        return None
     try:
         with _client() as c:
             r = c.post("/auth.test")

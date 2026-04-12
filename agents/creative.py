@@ -25,11 +25,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-import boto3
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import compliance
+import storage
 from clients import arcads_client, ideogram_client, slack_client
 from clients.anthropic_client import structured
 from db import session
@@ -48,27 +48,6 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 COPY_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
 MAX_COPY_RETRIES = 3
-
-
-# ---------- S3 helpers ----------
-
-
-def _s3():
-    return boto3.client("s3")
-
-
-def _bucket() -> str:
-    return os.environ["S3_BUCKET"]
-
-
-def _put_object(key: str, body: bytes, content_type: str) -> None:
-    _s3().put_object(Bucket=_bucket(), Key=key, Body=body, ContentType=content_type)
-
-
-def _presign(key: str, expires: int = 3600) -> str:
-    return _s3().generate_presigned_url(
-        "get_object", Params={"Bucket": _bucket(), "Key": key}, ExpiresIn=expires
-    )
 
 
 # ---------- Copy generation with compliance-retry loop ----------
@@ -159,7 +138,7 @@ def _generate_one(s: Session, case: Case, icp: ICP) -> Creative | None:
     try:
         image_bytes = ideogram_client.generate(image_prompt, aspect_ratio="1x1")
         image_key = f"creatives/{uuid.uuid4()}.png"
-        _put_object(image_key, image_bytes, "image/png")
+        storage.put_bytes(image_key, image_bytes, "image/png")
     except Exception:
         log.exception("image generation failed for case %s", case.id)
         image_key = None
@@ -196,7 +175,7 @@ def _generate_one(s: Session, case: Case, icp: ICP) -> Creative | None:
 
     # Post to Slack immediately with whatever we have; video URL gets added later.
     try:
-        image_url = _presign(image_key) if image_key else None
+        image_url = storage.presign(image_key) if image_key else None
         ts = slack_client.post_creative_for_approval(
             headline=copy.headline,
             primary_text=copy.primary_text,
@@ -249,7 +228,7 @@ def poll_videos() -> int:
                 if job.status == "completed" and job.video_url:
                     bytes_ = arcads_client.download_video(job.video_url)
                     key = f"creatives/{cr.id}.mp4"
-                    _put_object(key, bytes_, "video/mp4")
+                    storage.put_bytes(key, bytes_, "video/mp4")
                     cr.video_s3_key = key
                     cr.ai_disclosure_applied = True  # submitted with watermark_text
                     done += 1

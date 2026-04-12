@@ -8,14 +8,29 @@ Suepercharge — autonomous legal lead-gen MVP. Three agents (ingest, creative, 
 
 ## Commands
 
-- `uv sync` — install deps (Python 3.12, managed by uv)
-- `uv run pytest -q` — run tests
-- `uv run ruff check .` — lint
-- `uv run ruff format .` — format
-- `uv run alembic upgrade head` — apply DB migrations (requires `DATABASE_URL`)
-- `uv run alembic revision --autogenerate -m "..."` — new migration
-- `terraform -chdir=infra/terraform fmt` / `validate` / `plan` / `apply`
-- `scripts/build_lambda.sh` — build the single Lambda zip used by all 4 functions (needs Docker for arm64 cross-build)
+Prefer `make help` — the Makefile wraps every common incantation. Frequent ones:
+
+- `make install` / `make test` / `make lint` / `make check`
+- `make db-up` / `make migrate` / `make db-shell` / `make db-nuke`
+- `make parse URL=...` — single-URL Claude dry-run (no DB, no AWS)
+- `make seed` — insert a synthetic case into local Postgres
+- `make ingest` / `make creative` / `make campaign` — run one tick of an agent locally
+- `make approve` — list pending creative approvals in manual stub mode
+- `make simulate-lead` — invoke the Meta webhook handler with a signed fake lead
+- `make demo` — seed → creative → campaign → simulate lead, end-to-end with stubs
+- `make tf-validate` / `make lambda-zip` — infra commands
+
+## Local-dev: stub modes
+
+Every paid external service has a stub that activates when its key is missing (or when `LOCAL_STUB_<NAME>=1` is forced). The only live dep required is Anthropic. See `.env.local.example` for the full set.
+
+- Storage: `STORAGE_BACKEND=local` writes to `./.local-storage/` instead of S3.
+- Slack stub writes approvals to `./.local-approvals/<ts>.json`; `LOCAL_STUB_SLACK=manual` waits for a `<ts>.reaction` sidecar file. `scripts/approve.py` lists/creates those.
+- Arcads stub returns `completed` on first poll with a 1-byte MP4.
+- Ideogram stub returns a 1×1 PNG.
+- Meta stub returns `local-*` IDs for every object, and `fetch_lead` reads `./.local-leads/<id>.json` (or returns a default shape). `scripts/simulate_lead.py` drives this.
+
+Agents coordinate via row status in Postgres, not a queue. When iterating locally: update code → run the specific agent's Make target → psql to inspect rows.
 
 ## Architecture (MVP, keep it small)
 

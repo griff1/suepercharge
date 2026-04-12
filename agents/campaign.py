@@ -19,11 +19,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import boto3
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import compliance
+import storage
 from clients import meta_client
 from db import session
 from models import (
@@ -47,15 +47,6 @@ DESTINATION_URL = os.environ.get(
 )
 
 
-def _s3():
-    return boto3.client("s3")
-
-
-def _fetch_s3_bytes(key: str) -> bytes:
-    bucket = os.environ["S3_BUCKET"]
-    return _s3().get_object(Bucket=bucket, Key=key)["Body"].read()
-
-
 # ---------- Deploy pass ----------
 
 
@@ -71,8 +62,8 @@ def _approved_creatives_without_campaign(s: Session) -> list[Creative]:
 
 
 def _build_assets(cr: Creative) -> meta_client.CreativeAssets:
-    image_bytes = _fetch_s3_bytes(cr.image_s3_key) if cr.image_s3_key else None
-    video_bytes = _fetch_s3_bytes(cr.video_s3_key) if cr.video_s3_key else None
+    image_bytes = storage.get_bytes(cr.image_s3_key) if cr.image_s3_key else None
+    video_bytes = storage.get_bytes(cr.video_s3_key) if cr.video_s3_key else None
     return meta_client.CreativeAssets(
         headline=cr.headline or "",
         primary_text=cr.primary_text or "",

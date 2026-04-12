@@ -12,9 +12,11 @@ compliance.py.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +32,13 @@ import compliance
 log = logging.getLogger(__name__)
 
 _initialized = False
+
+
+def _stub_enabled() -> bool:
+    """Stub mode: LOCAL_STUB_META=1 OR META_ACCESS_TOKEN unset."""
+    if os.environ.get("LOCAL_STUB_META") in {"1", "true", "yes"}:
+        return True
+    return not os.environ.get("META_ACCESS_TOKEN")
 
 
 def _init() -> None:
@@ -140,6 +149,11 @@ def create_lead_form(
     The TCPA consent text goes into a `CUSTOM_DISCLAIMER` block that the
     user must see and the submission requires.
     """
+    if _stub_enabled():
+        form_id = f"local-form-{uuid.uuid4().hex[:12]}"
+        log.info("[stub:meta] create_lead_form name=%r -> %s", name[:60], form_id)
+        log.debug("[stub:meta] fields=%s consent_len=%d", [f.key for f in fields], len(consent_text))
+        return form_id
     _init()
     page = Page(_page_id())
 
@@ -186,6 +200,27 @@ def deploy_lead_campaign(
     destination_url: str,
 ) -> DeployResult:
     """Deploy an Advantage+ lead campaign with a single ad set and ad."""
+    if _stub_enabled():
+        cid = f"local-camp-{uuid.uuid4().hex[:10]}"
+        result = DeployResult(
+            campaign_id=cid,
+            adset_id=f"local-adset-{uuid.uuid4().hex[:10]}",
+            ad_id=f"local-ad-{uuid.uuid4().hex[:10]}",
+            creative_id=f"local-crt-{uuid.uuid4().hex[:10]}",
+            lead_form_id=lead_form_id,
+        )
+        log.info(
+            "[stub:meta] deploy_lead_campaign %s name=%r budget_cents=%d form=%s",
+            cid, campaign_name, daily_budget_cents, lead_form_id,
+        )
+        log.info(
+            "[stub:meta]   headline=%r cta=%s image=%s video=%s url=%s",
+            creative_assets.headline[:60], creative_assets.cta_type,
+            bool(creative_assets.image_bytes), bool(creative_assets.video_bytes),
+            destination_url,
+        )
+        return result
+
     _init()
     account = _ad_account()
 
@@ -290,12 +325,18 @@ def deploy_lead_campaign(
 
 def set_campaign_status(campaign_id: str, status: str) -> None:
     """status in ACTIVE, PAUSED, ARCHIVED, DELETED."""
+    if _stub_enabled() or campaign_id.startswith("local-"):
+        log.info("[stub:meta] set_campaign_status %s -> %s", campaign_id, status)
+        return
     _init()
     c = MetaCampaign(campaign_id)
     c.api_update(params={"status": status})
 
 
 def get_campaign_insights(campaign_id: str) -> dict[str, Any]:
+    if _stub_enabled() or campaign_id.startswith("local-"):
+        # Realistic-looking numbers so the monitor loop has something to log.
+        return {"spend": "0.00", "impressions": "0", "clicks": "0", "leads": "0"}
     _init()
     c = MetaCampaign(campaign_id)
     insights = c.get_insights(fields=["spend", "impressions", "clicks", "leads"])
@@ -307,7 +348,29 @@ def get_campaign_insights(campaign_id: str) -> dict[str, Any]:
 
 def fetch_lead(leadgen_id: str) -> dict[str, Any]:
     """Meta webhooks only send the leadgen_id. We call the Graph API to get the
-    actual field_data."""
+    actual field_data.
+
+    In stub mode, we look for a file at `.local-leads/<leadgen_id>.json`
+    matching the shape that Graph API would return. This lets
+    scripts/simulate_lead.py drop a file and fire a webhook with the matching
+    id."""
+    if _stub_enabled() or leadgen_id.startswith("local-"):
+        from pathlib import Path
+        path = Path(os.environ.get("LOCAL_LEADS_DIR", ".local-leads")) / f"{leadgen_id}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+        # Default-shaped minimal payload
+        return {
+            "id": leadgen_id,
+            "created_time": "2026-04-12T12:00:00+0000",
+            "field_data": [
+                {"name": "full_name", "values": ["Jane Local"]},
+                {"name": "email", "values": ["jane@local.test"]},
+                {"name": "phone_number", "values": ["+15555550123"]},
+                {"name": "qualifying_0", "values": ["Yes"]},
+            ],
+        }
+
     token = os.environ["META_ACCESS_TOKEN"]
     with httpx.Client(timeout=20.0) as c:
         r = c.get(
