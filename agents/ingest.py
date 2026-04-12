@@ -56,10 +56,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _short_url(url: str) -> str:
-    """Shorten a PR Newswire URL for log readability."""
-    # https://www.prnewswire.com/news-releases/some-long-slug-302739507.html -> some-long-slug
-    slug = url.rsplit("/", 1)[-1].replace(".html", "") if "prnewswire.com" in url else url
-    return slug[:60]
+    """Shorten a URL for log readability."""
+    if "prnewswire.com" in url:
+        return url.rsplit("/", 1)[-1].replace(".html", "")[:60]
+    if "classaction.org" in url:
+        return "classaction.org/" + url.rsplit("/", 1)[-1][:45]
+    if "sec.gov" in url:
+        return "sec.gov/" + url.rsplit("/", 1)[-1][:45]
+    if "globenewswire.com" in url:
+        return url.rsplit("/", 1)[-1].replace(".html", "")[:60]
+    return url[:60]
 
 # PR Newswire's legal/law feed. Configurable via env so we can swap in a
 # keyword-filtered search feed once we've measured precision.
@@ -118,51 +124,117 @@ def looks_like_class_action(entry: FeedEntry) -> bool:
     return any(k in blob for k in CLASS_ACTION_KEYWORDS)
 
 
-def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
-    """Fetch a PR Newswire article and extract the body text.
+# ---------- Additional sources ----------
 
-    We deliberately keep extraction simple: grab everything inside the
-    `release-body` container if present, else fall back to all visible text.
-    If PRNW changes their DOM, the fallback still produces usable text."""
+_HTTP_CLIENT_KWARGS = dict(
+    transport=httpx.HTTPTransport(retries=3),
+    timeout=20.0,
+    follow_redirects=True,
+    headers={"User-Agent": "suepercharge-ingest/0.1 (+https://suepercharge.ai)"},
+)
+
+
+def fetch_classaction_org() -> list[FeedEntry]:
+    """Scrape classaction.org/news for recent case articles."""
+    entries: list[FeedEntry] = []
+    try:
+        with httpx.Client(**_HTTP_CLIENT_KWARGS) as client:
+            resp = client.get("https://www.classaction.org/news")
+            resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for link in soup.select("a[href^='/news/']"):
+            href = link.get("href", "")
+            title = link.get_text(strip=True)
+            if not title or len(title) < 15 or href == "/news/":
+                continue
+            url = f"https://www.classaction.org{href}"
+            entries.append(FeedEntry(url=url, title=title, summary=""))
+    except Exception:
+        log.exception("failed to fetch classaction.org")
+    log.info("  classaction.org: %d articles", len(entries))
+    return entries
+
+
+def fetch_sec_litigation() -> list[FeedEntry]:
+    """Scrape SEC litigation releases page for enforcement actions."""
+    entries: list[FeedEntry] = []
+    try:
+        with httpx.Client(**_HTTP_CLIENT_KWARGS) as client:
+            resp = client.get("https://www.sec.gov/enforcement-litigation/litigation-releases")
+            resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for link in soup.select("a[href*='litigation-releases/lr-']"):
+            href = link.get("href", "")
+            title = link.get_text(strip=True)
+            if not title or len(title) < 5:
+                continue
+            url = f"https://www.sec.gov{href}" if href.startswith("/") else href
+            entries.append(FeedEntry(
+                url=url,
+                title=f"SEC Litigation: {title}",
+                summary="SEC enforcement action",
+            ))
+    except Exception:
+        log.exception("failed to fetch SEC litigation releases")
+    log.info("  SEC litigation:  %d releases", len(entries))
+    return entries
+
+
+def fetch_globenewswire() -> list[FeedEntry]:
+    """Scrape GlobeNewswire class action tag page."""
+    entries: list[FeedEntry] = []
+    try:
+        with httpx.Client(**_HTTP_CLIENT_KWARGS) as client:
+            resp = client.get("https://www.globenewswire.com/search/tag/ClassAction")
+            resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for link in soup.select("a[href*='/news-release/']"):
+            href = link.get("href", "")
+            title = link.get_text(strip=True)
+            if not title or len(title) < 15:
+                continue
+            url = f"https://www.globenewswire.com{href}" if href.startswith("/") else href
+            entries.append(FeedEntry(url=url, title=title, summary=""))
+    except Exception:
+        log.exception("failed to fetch GlobeNewswire")
+    log.info("  GlobeNewswire:   %d articles", len(entries))
+    return entries
+
+
+def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
+    """Fetch an article from any supported source and extract the body text."""
     close = False
     if client is None:
-        client = httpx.Client(
-            transport=httpx.HTTPTransport(retries=3),
-            timeout=20.0,
-            follow_redirects=True,
-            headers={"User-Agent": "suepercharge-ingest/0.1 (+https://suepercharge.ai)"},
-        )
+        client = httpx.Client(**_HTTP_CLIENT_KWARGS)
         close = True
     try:
         resp = client.get(url)
         resp.raise_for_status()
-        html = resp.text
+        raw_html = resp.text
     finally:
         if close:
             client.close()
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(raw_html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "aside"]):
         tag.decompose()
 
+    # Source-specific selectors, then generic fallbacks.
     container = (
-        soup.find(class_="release-body")
-        or soup.find(class_="prnews-body")
-        or soup.find(id="release-body")
-        or soup.find("article")
-        or soup.find(class_="main-content")
+        soup.find(class_="release-body")       # PR Newswire
+        or soup.find(class_="prnews-body")     # PR Newswire alt
+        or soup.find(id="release-body")        # PR Newswire id
+        or soup.find(class_="main-body-container")  # GlobeNewswire
+        or soup.find(class_="article-body")    # classaction.org
+        or soup.find("article")               # generic
+        or soup.find(class_="main-content")   # generic
         or soup.body
     )
     if container is None:
         return ""
-    # Use a space separator (not "\n") so inline elements don't shred phrases
-    # across lines — otherwise citation quotes never match the extracted text
-    # because of stray whitespace around punctuation. Keep paragraph structure
-    # by explicitly inserting double newlines between block-level elements.
     for block in container.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "br"]):
         block.append("\n\n")
     text = container.get_text(" ", strip=True)
-    # Collapse runs of whitespace inside a line; preserve paragraph breaks.
     paragraphs = [re.sub(r"[ \t]+", " ", p).strip() for p in text.split("\n\n")]
     return "\n\n".join(p for p in paragraphs if p)
 
@@ -459,14 +531,33 @@ def _log_icp(icp: GeneratedICP) -> None:
 
 
 def run_once(feed_urls: str | None = None) -> IngestResult:
-    urls = (feed_urls or os.environ.get("PRNW_FEED_URLS") or DEFAULT_FEED_URL).split(",")
-    urls = [u.strip() for u in urls if u.strip()]
+    # --- Gather entries from all sources ---
+    log.info("")
+    log.info("=" * 60)
+    log.info("  INGEST TICK")
+    log.info("=" * 60)
+    log.info("  Sources:")
 
     all_entries: list[FeedEntry] = []
-    for url in urls:
-        all_entries.extend(fetch_feed(url))
 
-    # Dedup by URL across feeds.
+    # 1. PR Newswire RSS (original source)
+    prnw_urls = (feed_urls or os.environ.get("PRNW_FEED_URLS") or DEFAULT_FEED_URL).split(",")
+    prnw_urls = [u.strip() for u in prnw_urls if u.strip()]
+    for url in prnw_urls:
+        feed_entries = fetch_feed(url)
+        log.info("  PR Newswire:     %d articles", len(feed_entries))
+        all_entries.extend(feed_entries)
+
+    # 2. ClassAction.org (consumer cases — data breach, product defect, etc.)
+    all_entries.extend(fetch_classaction_org())
+
+    # 3. SEC Litigation Releases (enforcement actions — early signal)
+    all_entries.extend(fetch_sec_litigation())
+
+    # 4. GlobeNewswire Class Action tag
+    all_entries.extend(fetch_globenewswire())
+
+    # Dedup by URL across all sources.
     seen: set[str] = set()
     entries: list[FeedEntry] = []
     for e in all_entries:
@@ -474,19 +565,23 @@ def run_once(feed_urls: str | None = None) -> IngestResult:
             seen.add(e.url)
             entries.append(e)
 
-    log.info("")
-    log.info("=" * 60)
-    log.info("  INGEST TICK")
-    log.info("=" * 60)
-    log.info("  Feed entries:    %d from %d feed(s)", len(entries), len(urls))
+    log.info("  Total unique:    %d", len(entries))
 
-    candidates = [e for e in entries if looks_like_class_action(e)]
-    keyword_skipped = [e for e in entries if e not in candidates]
+    # ClassAction.org and SEC entries skip keyword filter — they're already relevant.
+    candidates: list[FeedEntry] = []
+    keyword_skipped: list[FeedEntry] = []
+    for e in entries:
+        if "classaction.org" in e.url or "sec.gov" in e.url:
+            candidates.append(e)  # pre-qualified source
+        elif looks_like_class_action(e):
+            candidates.append(e)
+        else:
+            keyword_skipped.append(e)
     skipped_keyword = len(keyword_skipped)
 
     existing = _already_ingested([e.url for e in candidates])
     new = [e for e in candidates if e.url not in existing]
-    log.info("  Keyword match:   %d", len(candidates))
+    log.info("  Candidates:      %d", len(candidates))
     log.info("  Already seen:    %d", len(existing))
     log.info("  New to process:  %d", len(new))
 

@@ -276,7 +276,10 @@ def test_keyword_filter_covers_the_intended_keywords() -> None:
 # ---------- Multi-feed dedup ----------
 
 
-def test_multi_feed_deduplicates() -> None:
+@patch("agents.ingest.fetch_globenewswire", return_value=[])
+@patch("agents.ingest.fetch_sec_litigation", return_value=[])
+@patch("agents.ingest.fetch_classaction_org", return_value=[])
+def test_multi_feed_deduplicates(_ca, _sec, _gnw) -> None:
     """When two feeds return the same URL, run_once should only process it once."""
     entry_a = FeedEntry(url="https://example.com/same", title="Class action A", summary="")
     entry_b = FeedEntry(url="https://example.com/same", title="Class action B", summary="")
@@ -285,8 +288,6 @@ def test_multi_feed_deduplicates() -> None:
     with patch("agents.ingest.fetch_feed") as mock_fetch:
         mock_fetch.side_effect = [[entry_a, entry_c], [entry_b]]
 
-        # We need to also mock the DB + Claude calls since run_once calls them.
-        # Just verify the dedup logic by checking fetch_article_text call count.
         with (
             patch("agents.ingest._already_ingested", return_value=set()),
             patch("agents.ingest.fetch_article_text", return_value="") as mock_article,
@@ -302,7 +303,10 @@ def test_multi_feed_deduplicates() -> None:
 # ---------- End-to-end run_once ----------
 
 
-def test_viable_case_is_parsed_and_saved() -> None:
+@patch("agents.ingest.fetch_globenewswire", return_value=[])
+@patch("agents.ingest.fetch_sec_litigation", return_value=[])
+@patch("agents.ingest.fetch_classaction_org", return_value=[])
+def test_viable_case_is_parsed_and_saved(_ca, _sec, _gnw) -> None:
     """A viable case goes straight to ICP generation and persistence."""
     good_parsed = _parsed(citations=[])
 
@@ -326,7 +330,10 @@ def test_viable_case_is_parsed_and_saved() -> None:
         mock_icp.assert_called_once()
 
 
-def test_not_viable_case_is_rejected() -> None:
+@patch("agents.ingest.fetch_globenewswire", return_value=[])
+@patch("agents.ingest.fetch_sec_litigation", return_value=[])
+@patch("agents.ingest.fetch_classaction_org", return_value=[])
+def test_not_viable_case_is_rejected(_ca, _sec, _gnw) -> None:
     """A non-viable case is rejected without ICP generation."""
     rejected_parsed = _parsed(is_viable_class_action=False, reject_reason="not a class action")
 
