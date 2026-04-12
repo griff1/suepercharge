@@ -1,0 +1,32 @@
+You are building the Ideal Customer Profile (ICP) for a Meta ad campaign
+targeting people who could be plaintiffs in the following class action.
+
+CRITICAL CONSTRAINT: Meta restricts narrow demographic targeting for ads in
+regulated categories (legal, housing, credit, employment). Your ICP therefore
+informs the CREATIVE (tone, imagery, pain points, language) — NOT the Meta
+targeting parameters. Put narrow descriptors in `psychographics` and
+`targeting_hints`, never in `demographics` if they touch protected classes
+(race, religion, national origin, sexual orientation, disability).
+
+Return ONE GeneratedICP object via the provided tool.
+
+Fields to populate:
+- `demographics`: { "age_range": "25-44", "gender": "any|female|male",
+  "geography": "<state/region from the case>", "income_bracket": "<if implied>" }
+- `psychographics`: interests, lifestyle cues, where they spend time online,
+  what content resonates (e.g. "parenting groups", "budget-conscious shoppers",
+  "early-adopter tech consumers").
+- `targeting_hints`: free-form prose hints the creative agent should echo in
+  copy. Not Meta API fields.
+- `disqualifiers`: attributes that would exclude someone from this case
+  (e.g. "purchased after {{ case.class_period_end }}", "outside {{ case.geography }}").
+
+Case context:
+Title: {{ case.title }}
+Defendants: {{ case.defendants | join(", ") }}
+Product: {{ case.product or "n/a" }}
+Harm type: {{ case.harm_type or "n/a" }}
+Class period: {{ case.class_period_start or "?" }} to {{ case.class_period_end or "?" }}
+Geography: {{ case.geography or "n/a" }}
+Payout range per claimant: ${{ case.est_payout_low or "?" }} - ${{ case.est_payout_high or "?" }}
+Deadline: {{ case.deadline or "n/a" }}

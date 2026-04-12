@@ -1,0 +1,17 @@
+Photorealistic ad image for a class-action awareness campaign. The image
+must feel trustworthy and grounded — not alarming, not exploitative, not
+impersonating a court or government agency.
+
+Subject matter clues from the case:
+- Product / context: {{ case.product or case.harm_type or "consumer class action" }}
+- Audience: {{ icp.demographics }}
+
+Style guidance:
+- Clean, well-lit, editorial photography feel. NO text in the image (text
+  will be added by Meta's ad formatter).
+- Single human subject or a relevant neutral object — avoid gavels, scales
+  of justice, judges, police, or anything that could imply this is an
+  official legal notice.
+- Aspect ratio: 1:1 (square), intended for Meta feed placement.
+
+Additional tone from ICP targeting hints: {{ icp.targeting_hints }}

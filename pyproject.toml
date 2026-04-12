@@ -1,0 +1,39 @@
+[project]
+name = "suepercharge"
+version = "0.1.0"
+description = "Autonomous legal lead-gen MVP: PR Newswire -> Meta ads -> lead capture"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.39.0",
+    "boto3>=1.35.0",
+    "facebook-business>=21.0.0",
+    "feedparser>=6.0.11",
+    "httpx>=0.27.0",
+    "jinja2>=3.1.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic>=2.9.0",
+    "python-dateutil>=2.9.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "beautifulsoup4>=4.14.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-vcr>=1.0.2",
+    "ruff>=0.7.0",
+    "vcrpy>=6.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
