@@ -16,6 +16,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "alembic>=1.13.0",
     "beautifulsoup4>=4.14.3",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

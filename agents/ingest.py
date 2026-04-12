@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -153,10 +155,16 @@ def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
     )
     if container is None:
         return ""
-    text = container.get_text("\n", strip=True)
-    # Collapse runs of blank lines.
-    lines = [line for line in (ln.strip() for ln in text.splitlines()) if line]
-    return "\n".join(lines)
+    # Use a space separator (not "\n") so inline elements don't shred phrases
+    # across lines — otherwise citation quotes never match the extracted text
+    # because of stray whitespace around punctuation. Keep paragraph structure
+    # by explicitly inserting double newlines between block-level elements.
+    for block in container.find_all(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "br"]):
+        block.append("\n\n")
+    text = container.get_text(" ", strip=True)
+    # Collapse runs of whitespace inside a line; preserve paragraph breaks.
+    paragraphs = [re.sub(r"[ \t]+", " ", p).strip() for p in text.split("\n\n")]
+    return "\n\n".join(p for p in paragraphs if p)
 
 
 def upload_raw(body: str, _source_url: str) -> str:
@@ -187,8 +195,60 @@ _CITED_FIELDS = (
 )
 
 
+_WHITESPACE_RE = re.compile(r"\s+")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?)\]}])")
+_SPACE_AFTER_OPEN_RE = re.compile(r"([(\[{])\s+")
+
+
+def _normalize(text: str) -> str:
+    """Normalize text so citation-check isn't thrown by benign differences.
+
+    Real-world failure modes we've observed:
+    - BeautifulSoup inserts whitespace between inline elements; the extracted
+      text ends up with "Apollo Global Management , Inc." (stray space before
+      comma) while Claude quotes it as "Apollo Global Management, Inc.".
+    - Non-breaking spaces (\\xa0) vs regular spaces.
+    - Unicode NFC vs NFD (é vs e + combining-accent).
+    - Curly quotes "" '' vs straight " '.
+    - En/em dashes (U+2013, U+2014) vs hyphen-minus (-).
+
+    Strategy: NFKC fold, dash/quote fold, whitespace collapse, and — crucially
+    — remove whitespace adjacent to punctuation so split-across-inline-tags
+    text renders equivalently to Claude's reconstructed quote.
+    """
+    t = unicodedata.normalize("NFKC", text)
+    # Fold dash variants to hyphen-minus.
+    t = t.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
+    # Fold smart quotes to ASCII.
+    t = (
+        t.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
+    # Collapse runs of any whitespace into a single space.
+    t = _WHITESPACE_RE.sub(" ", t)
+    # Remove whitespace adjacent to punctuation introduced by HTML extraction.
+    t = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", t)
+    t = _SPACE_AFTER_OPEN_RE.sub(r"\1", t)
+    return t.strip()
+
+
+def quote_in_source(quote: str, source_text: str) -> bool:
+    """Public helper used by the validator AND the try_parse diagnostic so
+    the debug flags reflect what the validator actually accepts."""
+    if not quote:
+        return False
+    if quote in source_text:
+        return True
+    return _normalize(quote) in _normalize(source_text)
+
+
 @dataclass
 class CitationError:
+    """Details of a failed citation, fed back to the Claude retry prompt so it
+    can fix the specific problem instead of blindly regenerating."""
+
     field: str
     quote: str
     start: int
@@ -199,10 +259,24 @@ class CitationError:
 def validate_citations(
     parsed: ParsedCase, source_text: str,
 ) -> tuple[bool, str | None, list[CitationError]]:
-    """Return (is_valid, reason, errors). Every non-null cited field must have a
-    citation whose quoted substring appears at the claimed offsets in source_text.
-    When validation fails, `errors` contains details for each bad citation so the
-    retry prompt can tell Claude exactly what went wrong."""
+    """Return (is_valid, reason, errors).
+
+    Every non-null cited field must have a citation whose quoted substring
+    appears verbatim in source_text. The defense-in-depth goal is to catch
+    *hallucinated* facts; we deliberately tolerate three LLM artifacts that
+    aren't fabrications:
+
+      (a) miscounted character offsets      — Claude is bad at arithmetic
+      (b) Unicode normalization differences — NFC vs NFD, nbsp vs space
+      (c) typographic normalization         — curly quotes, en-dashes
+
+    A citation passes if the quote is present at the claimed offsets, OR
+    appears verbatim anywhere in source_text, OR appears after normalizing
+    both sides. Otherwise the quote wasn't in the source → hallucination.
+
+    When validation fails, `errors` contains structured details (field, quote,
+    offsets, what-source-had-there) so the retry prompt can tell Claude
+    exactly what went wrong."""
     citations_by_field: dict[str, list[Citation]] = {}
     for c in parsed.citations:
         citations_by_field.setdefault(c.field, []).append(c)
@@ -221,25 +295,23 @@ def validate_citations(
                 first_reason = f"Missing citation for field: {field}"
             errors.append(CitationError(field=field, quote="", start=0, end=0, actual=""))
             continue
-        # Verify at least one citation's quote actually appears at its offsets.
-        any_valid = False
-        for c in cites:
-            if 0 <= c.start_offset < c.end_offset <= len(source_text):
-                actual = source_text[c.start_offset : c.end_offset]
-                if actual == c.quote:
-                    any_valid = True
-                    break
-        if not any_valid:
-            if first_reason is None:
-                first_reason = f"Citation offsets don't match source for field: {field}"
-            # Use the first citation's details for the error report.
-            c = cites[0]
-            actual = ""
-            if 0 <= c.start_offset < c.end_offset <= len(source_text):
-                actual = source_text[c.start_offset : c.end_offset]
-            errors.append(CitationError(
-                field=field, quote=c.quote, start=c.start_offset, end=c.end_offset, actual=actual,
-            ))
+        # Pass if any citation's quote is present in source (with tolerance
+        # for miscounted offsets, Unicode drift, punctuation-adjacent ws).
+        if any(c.quote and quote_in_source(c.quote, source_text) for c in cites):
+            continue
+        # All citations for this field failed even with normalization — real
+        # hallucination. Record details from the first citation for the retry.
+        c = cites[0]
+        actual = ""
+        if 0 <= c.start_offset < c.end_offset <= len(source_text):
+            actual = source_text[c.start_offset : c.end_offset]
+        if first_reason is None:
+            first_reason = (
+                f"Citation quote for field '{field}' not found in source (hallucinated?)"
+            )
+        errors.append(CitationError(
+            field=field, quote=c.quote, start=c.start_offset, end=c.end_offset, actual=actual,
+        ))
 
     if errors:
         return False, first_reason, errors

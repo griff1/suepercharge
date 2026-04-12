@@ -15,7 +15,12 @@ dist/
 *.tfstate.backup
 .terraform.lock.hcl
 lambda-packages/
-.local-logs/
-.local-storage/
+# Local-dev stub state (never commit — contains generated creative, fake leads, etc.)
 .local-approvals/
+.local-storage/
 .local-leads/
+.local-logs/
+.env.bak
+
+# Claude Code per-user settings (never commit — may contain personal MCP tokens, etc.)
+.claude/settings.local.json

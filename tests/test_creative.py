@@ -38,8 +38,9 @@ class _FakeICP:
     targeting_hints: dict[str, Any] = field(default_factory=dict)
 
 
-def _copy(primary_text: str) -> GeneratedCopy:
+def _copy(primary_text: str, angle: str = "informative") -> GeneratedCopy:
     return GeneratedCopy(
+        angle=angle,
         headline="Affected by a recent data breach?",
         primary_text=primary_text,
         cta="LEARN_MORE",

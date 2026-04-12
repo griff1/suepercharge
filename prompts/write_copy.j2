@@ -5,13 +5,19 @@ government agency.
 
 Return ONE GeneratedCopy object via the provided tool.
 
-Structure:
-- `headline`: ≤ 40 characters, question or hook form.
-- `primary_text`: 2–4 short sentences, conversational, addresses the ICP.
-  End with a single-sentence CTA line that invites them to check eligibility.
-- `cta`: one of LEARN_MORE, SIGN_UP, APPLY_NOW, GET_QUOTE (Meta CTA buttons).
-- `rationale`: 1–2 sentences for our audit log, explaining why this copy
-  resonates with this ICP.
+Meta truncates primary text after ~125 characters on mobile. Write punchy,
+scannable copy — not a paragraph.
+
+Structure (hard length rules):
+- `angle`: "informative" for this single-variant path.
+- `headline`: 4–8 words, ≤ 40 characters. Hook form; no period at the end.
+- `primary_text`: ≤ 125 characters TOTAL across 1–2 short sentences.
+- `cta`: one of LEARN_MORE, SIGN_UP, APPLY_NOW, GET_QUOTE.
+- `rationale`: ≤ 2 short sentences for our audit log.
+
+Good primary-text examples (under 125 chars, punchy):
+- "Did you buy X between 2020–2023? You may qualify for compensation."
+- "Data breach settlement. Customers may be owed a payout. Check eligibility."
 
 Absolute rules — violating any of these means the copy is rejected:
 {{ blocklist }}

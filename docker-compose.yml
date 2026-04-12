@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: suepercharge
     ports:
-      - "5432:5432"
+      # Host 5433 → container 5432, so we don't collide with a local
+      # Homebrew/Postgres.app install that already owns host 5432.
+      - "5433:5432"
     volumes:
       - suepercharge-pg-data:/var/lib/postgresql/data
     healthcheck:

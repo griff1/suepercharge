@@ -106,6 +106,7 @@ def _deploy_one(s: Session, cr: Creative) -> Campaign | None:
             case_summary=(case.title or "")[:500],
             privacy_policy_url=PRIVACY_POLICY_URL,
             qualifying_question=_qualifying_question_for(case),
+            unique_suffix=str(cr.id)[:8],  # first 8 chars of creative UUID
         )
     except Exception as e:
         log.exception("lead form creation failed for case %s", case.id)

@@ -289,7 +289,24 @@ class GeneratedICP(BaseModel):
 
 
 class GeneratedCopy(BaseModel):
+    angle: str = Field(
+        ...,
+        description=(
+            "Editorial angle this variant occupies. One of: "
+            "'informative', 'empathetic', 'urgent'. Enforced upstream."
+        ),
+    )
     headline: str
     primary_text: str
     cta: str = Field(..., description="One of: LEARN_MORE, SIGN_UP, APPLY_NOW, GET_QUOTE")
     rationale: str = Field(..., description="Why this copy fits the ICP; for audit logs")
+
+
+class GeneratedCopyVariants(BaseModel):
+    """Claude's structured output when we request N variants in one call.
+    The agent enforces len(variants) == expected and angles are distinct."""
+
+    variants: list[GeneratedCopy] = Field(
+        ...,
+        description="One GeneratedCopy per requested angle, in the order requested.",
+    )

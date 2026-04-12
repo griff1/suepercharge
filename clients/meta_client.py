@@ -101,21 +101,48 @@ class DeployResult:
 
 
 def _upload_image(image_bytes: bytes) -> str:
-    """Upload to the ad account; return the image hash Meta uses to reference it."""
+    """Upload to the ad account; return the image hash Meta uses to reference it.
+
+    The facebook-business SDK JSON-encodes the `params` dict before sending
+    and raw `bytes` aren't JSON-serializable. The documented path is to pass
+    a `filename` — the SDK reads the file and uploads via multipart internally."""
+    import os as _os
+    import tempfile
+
     account = _ad_account()
-    result = account.create_ad_image(params={"bytes": image_bytes})
-    # The API response contains "images" keyed by filename; the hash is
-    # what we feed into AdCreative.
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(image_bytes)
+        tmp_path = tmp.name
+    try:
+        result = account.create_ad_image(params={"filename": tmp_path})
+    finally:
+        _os.unlink(tmp_path)
+    # The SDK v21+ returns an AdImage object with hash at the top level.
+    # Older SDKs wrapped it as {"images": {"<filename>": {"hash": "..."}}}.
+    # Handle both shapes.
+    if result.get("hash"):
+        return result["hash"]
     images = result.get("images", {})
-    if not images:
-        raise RuntimeError(f"Unexpected image upload response: {result}")
-    return next(iter(images.values()))["hash"]
+    if images:
+        return next(iter(images.values()))["hash"]
+    raise RuntimeError(f"Unexpected image upload response: {result}")
 
 
 def _upload_video(video_bytes: bytes) -> str:
-    """Upload a video; poll status until processed, return the video_id."""
+    """Upload a video; poll status until processed, return the video_id.
+
+    Same filename-based upload pattern as images."""
+    import os as _os
+    import tempfile
+
     account = _ad_account()
-    video = account.create_ad_video(params={"source": video_bytes})
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_path = tmp.name
+    try:
+        video = account.create_ad_video(params={"source": tmp_path})
+    finally:
+        _os.unlink(tmp_path)
     video_id = video["id"]
 
     # Poll upload processing status. Meta can take tens of seconds.
@@ -159,9 +186,13 @@ def create_lead_form(
 
     questions: list[dict[str, Any]] = []
     for f in fields:
-        q: dict[str, Any] = {"type": f.type, "key": f.key, "label": f.label}
-        if f.type == "CUSTOM" and f.options:
-            q["options"] = [{"value": o, "key": o} for o in f.options]
+        q: dict[str, Any] = {"type": f.type, "key": f.key}
+        # Meta rejects `label` on non-CUSTOM questions — they use their own
+        # localized labels for FULL_NAME / EMAIL / PHONE / etc.
+        if f.type == "CUSTOM":
+            q["label"] = f.label
+            if f.options:
+                q["options"] = [{"value": o, "key": o} for o in f.options]
         questions.append(q)
 
     params = {
@@ -176,11 +207,18 @@ def create_lead_form(
         },
         "questions": questions,
         # CUSTOM_DISCLAIMER surfaces the TCPA consent text with a required checkbox.
+        # Shape per Meta docs: body is an object with {"text": ...}, NOT a string.
+        # Checkbox uses `is_required` (not `required`).
         "custom_disclaimer": {
             "title": "Consent",
-            "body": consent_text,
+            "body": {"text": consent_text},
             "checkboxes": [
-                {"required": True, "text": "I agree to the terms above."},
+                {
+                    "key": "tcpa_consent",
+                    "text": "I agree to the terms above.",
+                    "is_required": True,
+                    "is_checked_by_default": False,
+                },
             ],
         },
     }
@@ -230,13 +268,18 @@ def deploy_lead_campaign(
             "name": campaign_name,
             "objective": "OUTCOME_LEADS",
             "status": "PAUSED",
-            "special_ad_categories": ["CREDIT"],  # Placeholder - see note below.
-            # NOTE: The correct category depends on jurisdiction/content. For
-            # many class actions "ISSUES_ELECTIONS_POLITICS" does NOT apply;
-            # credit/employment/housing usually don't either. Confirm with
-            # legal review. Leaving "CREDIT" here forces Advantage+ broad
-            # targeting and advertiser verification, both of which we want.
+            # Class-action awareness ads are not in any of Meta's regulated
+            # special categories (CREDIT/EMPLOYMENT/HOUSING/POLITICS/FINANCIAL_
+            # PRODUCTS_SERVICES/ONLINE_GAMBLING_AND_GAMING). NONE is correct —
+            # confirm with legal before launch. Note: narrow targeting is still
+            # restricted on legal-vertical ads regardless of category, so we
+            # rely on Advantage+ broad targeting at the ad set level.
+            "special_ad_categories": ["NONE"],
             "buying_type": "AUCTION",
+            # Required by Meta when campaign has no CBO budget (we budget at
+            # ad set level). False = each ad set gets its own full budget,
+            # no 20% cross-adset sharing.
+            "is_adset_budget_sharing_enabled": False,
         }
     )
     campaign_id = camp["id"]
@@ -335,12 +378,25 @@ def set_campaign_status(campaign_id: str, status: str) -> None:
 
 def get_campaign_insights(campaign_id: str) -> dict[str, Any]:
     if _stub_enabled() or campaign_id.startswith("local-"):
-        # Realistic-looking numbers so the monitor loop has something to log.
-        return {"spend": "0.00", "impressions": "0", "clicks": "0", "leads": "0"}
+        return {"spend": "0.00", "impressions": "0", "clicks": "0", "leads": 0}
     _init()
     c = MetaCampaign(campaign_id)
-    insights = c.get_insights(fields=["spend", "impressions", "clicks", "leads"])
-    return insights[0].export_all_data() if insights else {}
+    # Meta doesn't expose a direct "leads" field — lead counts come back in
+    # the `actions` array keyed by action_type "lead" or "leadgen.other".
+    insights = c.get_insights(fields=["spend", "impressions", "clicks", "actions"])
+    if not insights:
+        return {}
+    data = insights[0].export_all_data()
+    # Flatten lead-related actions into a top-level count for the monitor log.
+    import contextlib
+
+    lead_count = 0
+    for action in data.get("actions", []) or []:
+        if action.get("action_type") in ("lead", "leadgen.other", "onsite_conversion.lead_grouped"):
+            with contextlib.suppress(TypeError, ValueError):
+                lead_count += int(action.get("value", 0))
+    data["leads"] = lead_count
+    return data
 
 
 # ---------- Lead retrieval (called from webhook handler) ----------
@@ -406,12 +462,27 @@ def default_fields_for_case(qualifying_question: str | None) -> list[LeadFormFie
 
 
 def build_lead_form_for_case(
-    *, case_title: str, case_summary: str, privacy_policy_url: str,
+    *,
+    case_title: str,
+    case_summary: str,
+    privacy_policy_url: str,
     qualifying_question: str | None = None,
+    unique_suffix: str | None = None,
 ) -> str:
-    """Create a LeadgenForm with the TCPA consent text pinned to the current version."""
+    """Create a LeadgenForm with the TCPA consent text pinned to the current version.
+
+    Meta enforces unique form names per Page AND archived forms keep their
+    names reserved indefinitely (no hard-delete). Every deploy attempt must
+    therefore produce a NEW name, even if we retry the same creative. We
+    append a wall-clock epoch suffix in addition to the caller-provided
+    `unique_suffix` (typically a creative UUID prefix).
+    """
+    epoch = int(time.time())
+    base = f"Suepercharge — {case_title[:45]}"
+    tag = f"[{unique_suffix}-{epoch}]" if unique_suffix else f"[{epoch}]"
+    name = f"{base} {tag}"
     return create_lead_form(
-        name=f"Suepercharge — {case_title[:60]}",
+        name=name[:95],  # Meta form-name limit is 95 chars
         privacy_policy_url=privacy_policy_url,
         intro_headline=case_title[:80],
         intro_description=case_summary[:1000],
