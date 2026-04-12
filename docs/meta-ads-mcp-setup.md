@@ -72,8 +72,11 @@ The long-lived token expires after ~60 days. **Set a reminder for 55 days
 after generation** to repeat step 2 and update `META_ACCESS_TOKEN` in your
 shell profile.
 
-Last token generated: _(fill in date)_
-Next refresh due: _(fill in date + 55 days)_
+Last token generated: 2026-04-12
+Next refresh due: 2026-06-06
+
+> **Note**: `leads_retrieval` permission requires Meta app review. Not needed
+> until the campaign agent pulls real leads — the local stub handles it for now.
 
 ## Troubleshooting
 
