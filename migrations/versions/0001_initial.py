@@ -19,17 +19,9 @@ depends_on: str | None = None
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
 
-    case_status = postgresql.ENUM("parsed", "rejected", name="case_status", create_type=True)
-    creative_status = postgresql.ENUM(
-        "pending_approval", "approved", "rejected", name="creative_status", create_type=True
-    )
-    campaign_status = postgresql.ENUM(
-        "deploying", "active", "paused", "complete", "failed",
-        name="campaign_status", create_type=True,
-    )
-    case_status.create(op.get_bind(), checkfirst=True)
-    creative_status.create(op.get_bind(), checkfirst=True)
-    campaign_status.create(op.get_bind(), checkfirst=True)
+    op.execute("DO $$ BEGIN CREATE TYPE case_status AS ENUM ('parsed', 'rejected'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE creative_status AS ENUM ('pending_approval', 'approved', 'rejected'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE campaign_status AS ENUM ('deploying', 'active', 'paused', 'complete', 'failed'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
 
     op.create_table(
         "cases",

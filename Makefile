@@ -2,6 +2,9 @@
 # Philosophy: targets wrap the common incantations; if a target has more than
 # 3 lines of logic, it belongs in scripts/ instead.
 
+# Source .env if present — usage: $(call loadenv) && your-command
+loadenv = if [ -f .env ]; then set -a && . ./.env && set +a; fi
+
 .PHONY: help
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*##/ {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -75,19 +78,23 @@ parse-with-icp: ## Parse + generate ICP — usage: make parse-with-icp URL=https
 
 .PHONY: seed
 seed: ## Insert a synthetic Case + ICP into local Postgres
-	uv run scripts/seed_case.py
+	@$(call loadenv) && uv run scripts/seed_case.py
 
 .PHONY: ingest
 ingest: ## Run the ingest agent once against the live feed
-	uv run python -m agents.ingest
+	@$(call loadenv) && uv run python -m agents.ingest
+
+.PHONY: ingest-loop
+ingest-loop: ## Run the ingest agent on a loop (default 5m, override: INTERVAL=120)
+	@$(call loadenv) && uv run python -m agents.ingest --loop --interval $${INTERVAL:-300}
 
 .PHONY: creative
 creative: ## Run the creative agent once (stubs kick in if keys missing)
-	uv run python -m agents.creative
+	@$(call loadenv) && uv run python -m agents.creative
 
 .PHONY: campaign
 campaign: ## Run the campaign agent once (Meta stubbed if keys missing)
-	uv run python -m agents.campaign
+	@$(call loadenv) && uv run python -m agents.campaign
 
 .PHONY: approve
 approve: ## List pending local approvals; see `scripts/approve.py --help`
@@ -101,10 +108,40 @@ simulate-lead: ## Fire a fake Meta leadgen webhook at the handler
 
 .PHONY: demo
 demo: ## Full local demo: seed -> creative -> campaign -> simulate a lead
-	uv run scripts/seed_case.py
-	uv run python -m agents.creative
-	uv run python -m agents.campaign
-	uv run scripts/simulate_lead.py
+	@$(call loadenv) && uv run scripts/seed_case.py
+	@$(call loadenv) && uv run python -m agents.creative
+	@$(call loadenv) && uv run python -m agents.campaign
+	@$(call loadenv) && uv run scripts/simulate_lead.py
+
+# ----- local persistent agent (launchd) -----
+
+PLIST := $(HOME)/Library/LaunchAgents/com.suepercharge.ingest.plist
+
+.PHONY: agent-start
+agent-start: ## Start the ingest agent as a persistent background service
+	@mkdir -p .local-logs
+	launchctl load $(PLIST)
+	@echo "ingest agent started — logs at .local-logs/ingest.log"
+
+.PHONY: agent-stop
+agent-stop: ## Stop the ingest agent service
+	launchctl unload $(PLIST) 2>/dev/null || true
+	@echo "ingest agent stopped"
+
+.PHONY: agent-restart
+agent-restart: agent-stop agent-start ## Restart the ingest agent service
+
+.PHONY: agent-status
+agent-status: ## Check if the ingest agent is running
+	@launchctl list com.suepercharge.ingest 2>/dev/null && echo "running" || echo "not running"
+
+.PHONY: agent-logs
+agent-logs: ## Tail the ingest agent logs
+	tail -f .local-logs/ingest.log
+
+.PHONY: status
+status: ## Show ingest agent status dashboard
+	@$(call loadenv) && uv run scripts/status.py --detail
 
 # ----- infra -----
 

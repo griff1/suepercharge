@@ -21,6 +21,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import date
 
 import feedparser
 import httpx
@@ -41,7 +42,22 @@ from models import (
 from prompts import render
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+# Structured, human-readable log format. Suppress noisy httpx request logs.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _short_url(url: str) -> str:
+    """Shorten a PR Newswire URL for log readability."""
+    # https://www.prnewswire.com/news-releases/some-long-slug-302739507.html -> some-long-slug
+    slug = url.rsplit("/", 1)[-1].replace(".html", "") if "prnewswire.com" in url else url
+    return slug[:60]
 
 # PR Newswire's legal/law feed. Configurable via env so we can swap in a
 # keyword-filtered search feed once we've measured precision.
@@ -52,6 +68,7 @@ DEFAULT_FEED_URL = (
 
 PARSE_MODEL = os.environ.get("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5-20251001")
 ICP_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
+MAX_PARSE_RETRIES = 2  # one initial + up to two retries with error feedback
 
 # Filter keywords applied to RSS entry title/summary. A press release must
 # match at least one to be fetched. Tight enough to skip obvious noise, loose
@@ -80,12 +97,14 @@ class FeedEntry:
 
 def fetch_feed(feed_url: str = DEFAULT_FEED_URL) -> list[FeedEntry]:
     """Parse the RSS feed and return entries. `feedparser` handles fetch + parse."""
+    import html as _html
+
     parsed = feedparser.parse(feed_url)
     entries: list[FeedEntry] = []
     for e in parsed.entries:
         url = getattr(e, "link", None)
-        title = getattr(e, "title", "") or ""
-        summary = getattr(e, "summary", "") or ""
+        title = _html.unescape(getattr(e, "title", "") or "")
+        summary = _html.unescape(getattr(e, "summary", "") or "")
         if not url:
             continue
         entries.append(FeedEntry(url=url, title=title, summary=summary))
@@ -106,6 +125,7 @@ def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
     close = False
     if client is None:
         client = httpx.Client(
+            transport=httpx.HTTPTransport(retries=3),
             timeout=20.0,
             follow_redirects=True,
             headers={"User-Agent": "suepercharge-ingest/0.1 (+https://suepercharge.ai)"},
@@ -123,7 +143,14 @@ def fetch_article_text(url: str, *, client: httpx.Client | None = None) -> str:
     for tag in soup(["script", "style", "nav", "footer", "aside"]):
         tag.decompose()
 
-    container = soup.find(class_="release-body") or soup.find("article") or soup.body
+    container = (
+        soup.find(class_="release-body")
+        or soup.find(class_="prnews-body")
+        or soup.find(id="release-body")
+        or soup.find("article")
+        or soup.find(class_="main-content")
+        or soup.body
+    )
     if container is None:
         return ""
     text = container.get_text("\n", strip=True)
@@ -160,12 +187,28 @@ _CITED_FIELDS = (
 )
 
 
-def validate_citations(parsed: ParsedCase, source_text: str) -> tuple[bool, str | None]:
-    """Return (is_valid, reason). Every non-null cited field must have a citation
-    whose quoted substring appears at the claimed offsets in source_text."""
+@dataclass
+class CitationError:
+    field: str
+    quote: str
+    start: int
+    end: int
+    actual: str
+
+
+def validate_citations(
+    parsed: ParsedCase, source_text: str,
+) -> tuple[bool, str | None, list[CitationError]]:
+    """Return (is_valid, reason, errors). Every non-null cited field must have a
+    citation whose quoted substring appears at the claimed offsets in source_text.
+    When validation fails, `errors` contains details for each bad citation so the
+    retry prompt can tell Claude exactly what went wrong."""
     citations_by_field: dict[str, list[Citation]] = {}
     for c in parsed.citations:
         citations_by_field.setdefault(c.field, []).append(c)
+
+    errors: list[CitationError] = []
+    first_reason: str | None = None
 
     for field in _CITED_FIELDS:
         value = getattr(parsed, field)
@@ -174,7 +217,10 @@ def validate_citations(parsed: ParsedCase, source_text: str) -> tuple[bool, str 
             continue
         cites = citations_by_field.get(field, [])
         if not cites:
-            return False, f"Missing citation for field: {field}"
+            if first_reason is None:
+                first_reason = f"Missing citation for field: {field}"
+            errors.append(CitationError(field=field, quote="", start=0, end=0, actual=""))
+            continue
         # Verify at least one citation's quote actually appears at its offsets.
         any_valid = False
         for c in cites:
@@ -184,16 +230,35 @@ def validate_citations(parsed: ParsedCase, source_text: str) -> tuple[bool, str 
                     any_valid = True
                     break
         if not any_valid:
-            return False, f"Citation offsets don't match source for field: {field}"
+            if first_reason is None:
+                first_reason = f"Citation offsets don't match source for field: {field}"
+            # Use the first citation's details for the error report.
+            c = cites[0]
+            actual = ""
+            if 0 <= c.start_offset < c.end_offset <= len(source_text):
+                actual = source_text[c.start_offset : c.end_offset]
+            errors.append(CitationError(
+                field=field, quote=c.quote, start=c.start_offset, end=c.end_offset, actual=actual,
+            ))
 
-    return True, None
+    if errors:
+        return False, first_reason, errors
+    return True, None, []
 
 
 # ---------- Claude calls ----------
 
 
-def parse_case(source_text: str) -> ParsedCase:
-    prompt = render("parse_case", source_text=source_text)
+MAX_SOURCE_CHARS = 50_000  # ~12k tokens; safety valve for outlier articles
+
+
+def parse_case(
+    source_text: str, *, citation_errors: list[CitationError] | None = None,
+) -> ParsedCase:
+    if len(source_text) > MAX_SOURCE_CHARS:
+        log.warning("truncating article from %d to %d chars", len(source_text), MAX_SOURCE_CHARS)
+        source_text = source_text[:MAX_SOURCE_CHARS]
+    prompt = render("parse_case", source_text=source_text, citation_errors=citation_errors)
     return structured(
         prompt=prompt,
         response_model=ParsedCase,
@@ -203,8 +268,8 @@ def parse_case(source_text: str) -> ParsedCase:
     )
 
 
-def build_icp(parsed: ParsedCase) -> GeneratedICP:
-    prompt = render("build_icp", case=parsed)
+def build_icp(parsed: ParsedCase, source_text: str) -> GeneratedICP:
+    prompt = render("build_icp", case=parsed, source_text=source_text)
     return structured(
         prompt=prompt,
         response_model=GeneratedICP,
@@ -292,19 +357,66 @@ class IngestResult:
     errored: int
 
 
-def run_once(feed_url: str = DEFAULT_FEED_URL) -> IngestResult:
-    entries = fetch_feed(feed_url)
-    log.info("fetched %d entries from feed", len(entries))
+def _log_icp(icp: GeneratedICP) -> None:
+    """Pretty-print ICP fields to the log, one sub-field per line."""
+
+    def _val(v: object) -> str:
+        if isinstance(v, dict):
+            if "value" in v and len(v) == 1:
+                return str(v["value"])
+            if "items" in v and len(v) == 1:
+                return _val(v["items"])
+            return "; ".join(f"{k}: {_val(sub)}" for k, sub in v.items())
+        if isinstance(v, list):
+            return ", ".join(_val(i) for i in v)
+        return str(v)
+
+    def _log_section(label: str, data: dict) -> None:
+        log.info("         %s", label)
+        for k, v in data.items():
+            log.info("           %-14s %s", k + ":", _val(v))
+
+    if icp.demographics:
+        _log_section("WHO", icp.demographics)
+    if icp.psychographics:
+        _log_section("INTERESTS", icp.psychographics)
+    if icp.targeting_hints:
+        _log_section("AD ANGLE", icp.targeting_hints)
+    if icp.disqualifiers:
+        _log_section("EXCLUDE", icp.disqualifiers)
+
+
+def run_once(feed_urls: str | None = None) -> IngestResult:
+    urls = (feed_urls or os.environ.get("PRNW_FEED_URLS") or DEFAULT_FEED_URL).split(",")
+    urls = [u.strip() for u in urls if u.strip()]
+
+    all_entries: list[FeedEntry] = []
+    for url in urls:
+        all_entries.extend(fetch_feed(url))
+
+    # Dedup by URL across feeds.
+    seen: set[str] = set()
+    entries: list[FeedEntry] = []
+    for e in all_entries:
+        if e.url not in seen:
+            seen.add(e.url)
+            entries.append(e)
+
+    log.info("")
+    log.info("=" * 60)
+    log.info("  INGEST TICK")
+    log.info("=" * 60)
+    log.info("  Feed entries:    %d from %d feed(s)", len(entries), len(urls))
 
     candidates = [e for e in entries if looks_like_class_action(e)]
     skipped_keyword = len(entries) - len(candidates)
 
     existing = _already_ingested([e.url for e in candidates])
     new = [e for e in candidates if e.url not in existing]
-    log.info(
-        "%d candidates after keyword filter; %d already ingested; %d new",
-        len(candidates), len(existing), len(new),
-    )
+    log.info("  Keyword match:   %d", len(candidates))
+    log.info("  Already seen:    %d", len(existing))
+    log.info("  New to process:  %d", len(new))
+    log.info("-" * 60)
 
     result = IngestResult(
         fetched=len(entries),
@@ -315,18 +427,28 @@ def run_once(feed_url: str = DEFAULT_FEED_URL) -> IngestResult:
         errored=0,
     )
 
-    for entry in new:
+    for i, entry in enumerate(new, 1):
+        slug = _short_url(entry.url)
+        log.info("")
+        log.info("  [%d/%d] %s", i, len(new), entry.title)
+        log.info("         %s", slug)
+
         try:
             text = fetch_article_text(entry.url)
             if not text.strip():
+                log.warning("         SKIP  empty article body")
                 _persist_rejected(entry=entry, reason="empty article body", raw_s3_key=None)
                 result.rejected += 1
                 continue
 
+            log.info("         scraped %d chars", len(text))
             s3_key = upload_raw(text, entry.url)
+
+            log.info("         parsing with LLM...")
             parsed = parse_case(text)
 
             if not parsed.is_viable_class_action:
+                log.info("         SKIP  not viable: %s", parsed.reject_reason or "n/a")
                 _persist_rejected(
                     entry=entry,
                     reason=parsed.reject_reason or "not a viable class action",
@@ -335,22 +457,46 @@ def run_once(feed_url: str = DEFAULT_FEED_URL) -> IngestResult:
                 result.rejected += 1
                 continue
 
-            ok, reason = validate_citations(parsed, text)
-            if not ok:
-                _persist_rejected(entry=entry, reason=f"citation check failed: {reason}", raw_s3_key=s3_key)
-                result.rejected += 1
-                continue
+            if not parsed.title:
+                parsed.title = entry.title
+            log.info("         parsed: %s", parsed.title[:60])
+            if parsed.defendants:
+                log.info("         defendants: %s", ", ".join(parsed.defendants))
+            if parsed.geography:
+                log.info("         geography: %s", parsed.geography)
+            if parsed.est_payout_low or parsed.est_payout_high:
+                log.info("         payout: $%s - $%s", parsed.est_payout_low, parsed.est_payout_high)
+            if parsed.deadline:
+                log.info("         deadline: %s", parsed.deadline)
+                days_left = (parsed.deadline - date.today()).days
+                if days_left < 7:
+                    log.warning("         SKIP  deadline too soon (%d days) — no time for ad spend", days_left)
+                    _persist_rejected(
+                        entry=entry,
+                        reason=f"deadline too soon ({days_left} days left)",
+                        raw_s3_key=s3_key,
+                    )
+                    result.rejected += 1
+                    continue
 
-            icp = build_icp(parsed)
+            log.info("         generating ICP...")
+            icp = build_icp(parsed, source_text=text)
             case_id = _persist_case_and_icp(entry=entry, parsed=parsed, icp=icp, raw_s3_key=s3_key)
-            log.info("ingested case %s from %s", case_id, entry.url)
+            log.info("         SAVED  case %s", case_id)
+            log.info("         --- ICP ---")
+            _log_icp(icp)
             result.parsed += 1
 
-        except Exception:
-            log.exception("ingest failed for %s", entry.url)
+        except Exception as exc:
+            log.error("         ERROR  %s: %s", type(exc).__name__, exc)
             result.errored += 1
 
-    log.info("ingest run: %s", result)
+    log.info("")
+    log.info("=" * 60)
+    log.info("  RESULTS  parsed=%d  rejected=%d  errored=%d  skipped=%d",
+             result.parsed, result.rejected, result.errored,
+             result.skipped_existing + result.skipped_keyword)
+    log.info("=" * 60)
     return result
 
 
@@ -358,8 +504,8 @@ def run_once(feed_url: str = DEFAULT_FEED_URL) -> IngestResult:
 
 
 def handler(event: dict, _context: object) -> dict:
-    feed_url = event.get("feed_url") or os.environ.get("PRNW_FEED_URL", DEFAULT_FEED_URL)
-    result = run_once(feed_url)
+    feed_urls = event.get("feed_urls") or event.get("feed_url") or None
+    result = run_once(feed_urls)
     return {
         "fetched": result.fetched,
         "skipped_existing": result.skipped_existing,
@@ -371,6 +517,31 @@ def handler(event: dict, _context: object) -> dict:
 
 
 if __name__ == "__main__":
+    import argparse
     import json
+    import time
 
-    print(json.dumps(handler({}, None), indent=2))
+    ap = argparse.ArgumentParser(description="Run the ingest agent.")
+    ap.add_argument(
+        "--loop", action="store_true",
+        help="Run continuously on an interval instead of once.",
+    )
+    ap.add_argument(
+        "--interval", type=int,
+        default=int(os.environ.get("INGEST_INTERVAL_SECONDS", "300")),
+        help="Seconds between runs when --loop is set (default: 300 / env INGEST_INTERVAL_SECONDS).",
+    )
+    args = ap.parse_args()
+
+    if not args.loop:
+        print(json.dumps(handler({}, None), indent=2))
+    else:
+        log.info("Ingest agent started  (interval=%ds)", args.interval)
+        while True:
+            try:
+                run_once()
+            except Exception:
+                log.exception("Tick failed with unhandled error")
+            log.info("  Next tick in %ds...", args.interval)
+            log.info("")
+            time.sleep(args.interval)

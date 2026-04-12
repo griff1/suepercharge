@@ -15,3 +15,7 @@ dist/
 *.tfstate.backup
 .terraform.lock.hcl
 lambda-packages/
+.local-logs/
+.local-storage/
+.local-approvals/
+.local-leads/
