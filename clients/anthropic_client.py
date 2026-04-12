@@ -91,26 +91,71 @@ def _ollama_structured[T: BaseModel](
     content = resp.json()["message"]["content"]
 
     try:
-        data = json.loads(content)
-        # Fill required string fields that the model left null.
-        for field_name, field_info in response_model.model_fields.items():
-            if field_name in data and data[field_name] is None and field_info.is_required():
-                annotation = str(field_info.annotation)
-                if "str" in annotation:
-                    data[field_name] = ""
+        import re as _re
 
-        # Coerce common type mismatches from small models.
+        data = json.loads(content)
+
         for field_name, field_info in response_model.model_fields.items():
+            val = data.get(field_name)
+            annotation = str(field_info.annotation)
+
+            # Null → default: use the field's default value if the model returned null.
+            if val is None and field_name in data:
+                if field_info.default is not None:
+                    data[field_name] = field_info.default
+                elif "list" in annotation.lower():
+                    data[field_name] = []
+                elif "str" in annotation and field_info.is_required():
+                    data[field_name] = ""
+                continue
+
             if field_name not in data:
                 continue
-            val = data[field_name]
-            annotation = str(field_info.annotation)
-            if "list" in annotation.lower() and isinstance(val, str):
-                data[field_name] = [val]
-            elif "dict" in annotation.lower() and isinstance(val, str):
-                data[field_name] = {"value": val}
-            elif "dict" in annotation.lower() and isinstance(val, list):
-                data[field_name] = {"items": val}
+
+            # Date fix: normalize various formats to YYYY-MM-DD or null
+            if "date" in annotation.lower() and isinstance(val, str):
+                if _re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+                    pass  # already correct
+                elif _re.match(r"^\d{4}-\d{2}$", val):
+                    data[field_name] = val + "-01"
+                elif val in ("", "present", "ongoing", "n/a", "unknown"):
+                    data[field_name] = None
+                else:
+                    # Try parsing natural language dates like "September 2017"
+                    _MONTHS = {
+                        "january": "01", "february": "02", "march": "03",
+                        "april": "04", "may": "05", "june": "06", "july": "07",
+                        "august": "08", "september": "09", "october": "10",
+                        "november": "11", "december": "12",
+                    }
+                    m = _re.match(r"(\w+)\s+(\d{4})", val)
+                    if m and m.group(1).lower() in _MONTHS:
+                        data[field_name] = f"{m.group(2)}-{_MONTHS[m.group(1).lower()]}-01"
+                    else:
+                        data[field_name] = None  # unparseable, drop it
+
+            # List coercion (check before str since list[str] contains "str")
+            elif "list" in annotation.lower():
+                if isinstance(val, str):
+                    data[field_name] = [val] if val else []
+                elif isinstance(val, list) and val and isinstance(val[0], dict) and "name" in val[0]:
+                    data[field_name] = [d.get("name", str(d)) for d in val]
+
+            # Dict coercion
+            elif "dict" in annotation.lower():
+                if isinstance(val, str):
+                    data[field_name] = {"value": val}
+                elif isinstance(val, list):
+                    data[field_name] = {"items": val}
+
+            # String coercion (model returned dict/list for a str field)
+            elif "str" in annotation and not isinstance(val, str):
+                if isinstance(val, dict):
+                    flat = next(iter(val.values()), "unknown") if val else "unknown"
+                    data[field_name] = ", ".join(str(x) for x in flat) if isinstance(flat, list) else str(flat)
+                elif isinstance(val, list):
+                    data[field_name] = ", ".join(str(x) for x in val)
+
         return response_model.model_validate(data)
     except (ValidationError, json.JSONDecodeError) as e:
         raise StructuredOutputError(
