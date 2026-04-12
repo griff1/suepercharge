@@ -7,6 +7,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+import load_env  # noqa: F401 -- loads .env so DATABASE_URL comes from the repo, not stale shell env
+
 # Import our models so metadata is populated for autogenerate.
 from models import Base
 

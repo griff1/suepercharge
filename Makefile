@@ -18,7 +18,18 @@ install: ## uv sync (install all deps)
 db-up: ## Start local Postgres (Docker)
 	docker compose up -d postgres
 	@until docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; do sleep 0.5; done
-	@echo "postgres ready on localhost:5432"
+	@# Verify the host port actually forwards to our container (not something else on :5432)
+	@port=$$(docker compose port postgres 5432 2>/dev/null | awk -F: '{print $$NF}'); \
+	  if [ -z "$$port" ]; then echo "ERROR: docker compose didn't expose postgres"; exit 1; fi; \
+	  if ! docker exec suepercharge-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then \
+	    echo "ERROR: container not responding"; exit 1; fi; \
+	  echo "postgres ready on localhost:$$port"
+	@# Separate check: the host side actually reaches OUR container.
+	@host_port=$$(docker compose port postgres 5432 2>/dev/null | awk -F: '{print $$NF}'); \
+	  if ! (exec 3<>/dev/tcp/127.0.0.1/$$host_port) 2>/dev/null; then \
+	    echo "WARNING: something else is listening on host port $$host_port —"; \
+	    echo "         check with: lsof -i :$$host_port"; \
+	  fi
 
 .PHONY: db-down
 db-down: ## Stop local Postgres (keeps volume)
@@ -35,14 +46,12 @@ db-shell: ## psql into local Postgres
 # ----- alembic -----
 
 .PHONY: migrate
-migrate: ## Apply migrations to $(DATABASE_URL) or local pg
-	DATABASE_URL=$${DATABASE_URL:-postgresql+psycopg://postgres:postgres@localhost:5432/suepercharge} \
-		uv run alembic upgrade head
+migrate: ## Apply migrations using DATABASE_URL from .env
+	uv run alembic upgrade head
 
 .PHONY: migration
 migration: ## Create a new autogenerate migration — usage: make migration MSG="add foo"
-	DATABASE_URL=$${DATABASE_URL:-postgresql+psycopg://postgres:postgres@localhost:5432/suepercharge} \
-		uv run alembic revision --autogenerate -m "$(MSG)"
+	uv run alembic revision --autogenerate -m "$(MSG)"
 
 # ----- quality -----
 
@@ -70,6 +79,18 @@ parse: ## Parse one URL (Claude only, no DB) — usage: make parse URL=https://.
 .PHONY: parse-with-icp
 parse-with-icp: ## Parse + generate ICP — usage: make parse-with-icp URL=https://...
 	uv run scripts/try_parse.py "$(URL)" --with-icp
+
+.PHONY: parse-with-copy
+parse-with-copy: ## Parse + ICP + 3 copy variants — usage: make parse-with-copy URL=https://...
+	uv run scripts/try_parse.py "$(URL)" --with-icp --with-copy
+
+.PHONY: parse-with-images
+parse-with-images: ## Parse + ICP + 3 copy variants + 3 images — usage: make parse-with-images URL=https://...
+	uv run scripts/try_parse.py "$(URL)" --with-icp --with-copy --with-images
+
+.PHONY: copy
+copy: ## Copy-gen from saved JSON — usage: make copy IN=case.json [N=3]
+	uv run scripts/try_copy.py "$(IN)" $(if $(N),--iterations $(N))
 
 # ----- local agent runs (needs DB; stubs cover external APIs) -----
 
@@ -99,12 +120,29 @@ simulate-lead: ## Fire a fake Meta leadgen webhook at the handler
 
 # ----- one-shot local pipeline demo (no keys required beyond Anthropic) -----
 
+# The creative agent needs two ticks for an approval to flow through:
+#   tick 1: generate_new() creates creatives in pending_approval
+#   tick 2: poll_approvals() flips them to approved via the Slack stub
+# Then campaign can pick them up.
+
 .PHONY: demo
-demo: ## Full local demo: seed -> creative -> campaign -> simulate a lead
+demo: ## Full local demo: seed -> creative (x2) -> campaign -> simulate a lead
 	uv run scripts/seed_case.py
+	uv run python -m agents.creative
 	uv run python -m agents.creative
 	uv run python -m agents.campaign
 	uv run scripts/simulate_lead.py
+
+.PHONY: test-meta
+test-meta: ## Test-deploy to Meta (PAUSED). Needs META_* in .env and LOCAL_STUB_META=0.
+	@grep -q "^LOCAL_STUB_META=0" .env || (echo "Set LOCAL_STUB_META=0 in .env first"; exit 1)
+	uv run scripts/seed_case.py
+	uv run python -m agents.creative
+	uv run python -m agents.creative
+	uv run python -m agents.campaign
+	@echo ""
+	@echo "Check Ads Manager: https://business.facebook.com/adsmanager"
+	@echo "Look for a campaign named 'suepercharge/<case-uuid>' in PAUSED state."
 
 # ----- infra -----
 

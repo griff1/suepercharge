@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select
 
+import load_env  # noqa: F401 -- imports .env before env-var lookups
 from agents import campaign as campaign_agent
 from db import session
 from models import Campaign, Lead

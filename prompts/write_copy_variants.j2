@@ -1,0 +1,52 @@
+You are writing Meta feed ad copy for a class-action awareness campaign.
+Meta truncates primary text after ~125 characters on mobile — every word
+beyond that is invisible. Write punchy, scannable copy.
+
+Produce THREE distinct variants, one per editorial angle listed below. Same
+case, same ICP, different emotional hook per variant.
+
+Return ONE GeneratedCopyVariants object with exactly {{ angles | length }}
+entries in the `variants` list, in the same order as the angles below.
+
+Angles (the `angle` field on each variant MUST match the literal name on the left):
+{% for a in angles %}
+- "{{ a.name }}" — {{ a.description }}
+{%- endfor %}
+
+Hard length + style rules (violations get regenerated):
+- `headline`: 4–8 words, ≤ 40 characters. Hook form; no period at the end.
+- `primary_text`: ≤ 125 characters TOTAL across 1–2 short sentences. Read
+  the character count as you write — long copy gets truncated on mobile and
+  loses its CTA.
+- `cta`: one of LEARN_MORE, SIGN_UP, APPLY_NOW, GET_QUOTE.
+- `rationale`: ≤ 2 short sentences. For our audit log only.
+
+Each variant must be MEANINGFULLY different. Different hook word, different
+sentence structure, different verbs. Don't restate the same claim with synonyms.
+
+Good primary-text examples (under 125 chars, punchy):
+- "Did you buy X between 2020–2023? You may qualify for compensation. Check eligibility."
+- "Data breach settlement. If you were a customer, you could be owed a payout."
+- "Deadline closing: May 1. See if your X purchase qualifies in 60 seconds."
+
+Absolute rules — violating any means the entire response is rejected:
+{{ blocklist }}
+
+Case:
+Title: {{ case.title }}
+Defendants: {{ case.defendants | join(", ") }}
+Product: {{ case.product or "n/a" }}
+Harm type: {{ case.harm_type or "n/a" }}
+Class period: {{ case.class_period_start or "?" }} to {{ case.class_period_end or "?" }}
+Payout range: ${{ case.est_payout_low or "?" }} - ${{ case.est_payout_high or "?" }} per claimant
+Deadline: {{ case.deadline or "n/a" }}
+
+ICP:
+Demographics: {{ icp.demographics }}
+Psychographics: {{ icp.psychographics }}
+Targeting hints (echo in tone): {{ icp.targeting_hints }}
+{% if retry_reason %}
+
+The previous attempt was rejected: {{ retry_reason }}
+Rewrite to avoid the prohibited patterns AND respect every length rule above.
+{% endif %}

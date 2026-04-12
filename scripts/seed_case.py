@@ -21,6 +21,7 @@ from datetime import UTC, date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import load_env  # noqa: F401 -- imports .env before DATABASE_URL lookup
 from db import session
 from models import ICP, Case, CaseStatus
 

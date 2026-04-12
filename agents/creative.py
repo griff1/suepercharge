@@ -30,7 +30,11 @@ from sqlalchemy.orm import Session
 
 import compliance
 import storage
-from clients import arcads_client, ideogram_client, slack_client
+from clients import (
+    arcads_client,
+    ideogram_client,
+    slack_client,
+)
 from clients.anthropic_client import structured
 from db import session
 from models import (
@@ -40,6 +44,7 @@ from models import (
     Creative,
     CreativeStatus,
     GeneratedCopy,
+    GeneratedCopyVariants,
 )
 from prompts import render
 
@@ -49,20 +54,125 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 COPY_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
 MAX_COPY_RETRIES = 3
 
+# Fixed angle set. Three is the MVP count — small enough for a reviewer to
+# eyeball, diverse enough to A/B. Override per-case later once we have
+# performance data. Each angle drives both copy tone AND image composition
+# (see prompts/image_prompt.j2 and prompts/write_copy_variants.j2).
+AD_ANGLES: list[dict[str, str]] = [
+    {
+        "name": "informative",
+        "description": (
+            "Factual, calm, low-pressure. Lead with what happened and who "
+            "might be eligible. Suited to high-context audiences and complex "
+            "products (e.g. securities fraud, product defects)."
+        ),
+    },
+    {
+        "name": "empathetic",
+        "description": (
+            "Acknowledges the harm and the reader's situation. Warm, "
+            "low-pressure tone. Suited to sensitive cases — data breach, "
+            "medical device, privacy violations."
+        ),
+    },
+    {
+        "name": "urgent",
+        "description": (
+            "Deadline-forward. Emphasizes the claim window closing without "
+            "fear-mongering. Suited to cases with a near-term filing deadline."
+        ),
+    },
+]
+ANGLE_NAMES: tuple[str, ...] = tuple(a["name"] for a in AD_ANGLES)
+
 
 # ---------- Copy generation with compliance-retry loop ----------
 
 
 @dataclass
 class CopyResult:
+    """Single-variant copy result. Kept for backward compat with the
+    single-copy path (try_copy.py, existing tests)."""
+
     copy: GeneratedCopy
     attempts: int
     findings_history: list[list[compliance.PolicyFinding]]
 
 
+@dataclass
+class VariantsResult:
+    variants: list[GeneratedCopy]
+    attempts: int
+    findings_history: list[list[compliance.PolicyFinding]]
+
+
+def _scan_variants(variants: list[GeneratedCopy]) -> list[compliance.PolicyFinding]:
+    """Return all blocklist findings across every variant."""
+    findings: list[compliance.PolicyFinding] = []
+    for v in variants:
+        findings.extend(compliance.scan_copy(f"{v.headline}\n{v.primary_text}"))
+    return findings
+
+
+def generate_compliant_variants(
+    *, case: Case, icp: ICP, angles: list[dict[str, str]] | None = None
+) -> VariantsResult | None:
+    """Generate one copy per angle in a single Claude call, retry if any
+    variant trips the blocklist. Returns None after MAX_COPY_RETRIES."""
+    angles = angles or AD_ANGLES
+    expected_names = [a["name"] for a in angles]
+    history: list[list[compliance.PolicyFinding]] = []
+    last_reason: str | None = None
+
+    for attempt in range(1, MAX_COPY_RETRIES + 1):
+        prompt = render(
+            "write_copy_variants",
+            case=case,
+            icp=icp,
+            angles=angles,
+            blocklist=compliance.blocklist_for_prompt(),
+            retry_reason=last_reason,
+        )
+        result = structured(
+            prompt=prompt,
+            response_model=GeneratedCopyVariants,
+            model=COPY_MODEL,
+            temperature=0.8,  # higher than single-copy — we want diversity
+            max_tokens=2048,
+        )
+        variants = result.variants
+
+        # Structural checks: right count, right angles, in the order we asked.
+        if len(variants) != len(expected_names):
+            last_reason = (
+                f"expected {len(expected_names)} variants, got {len(variants)}"
+            )
+            log.warning("copy attempt %d: %s", attempt, last_reason)
+            continue
+        returned_angles = [v.angle for v in variants]
+        if returned_angles != expected_names:
+            last_reason = (
+                f"angle mismatch: expected {expected_names}, got {returned_angles}"
+            )
+            log.warning("copy attempt %d: %s", attempt, last_reason)
+            continue
+
+        findings = _scan_variants(variants)
+        history.append(findings)
+        if not findings:
+            return VariantsResult(
+                variants=variants, attempts=attempt, findings_history=history
+            )
+        last_reason = "; ".join(sorted({f.pattern for f in findings}))
+        log.warning("copy attempt %d violated blocklist: %s", attempt, last_reason)
+
+    log.error("gave up on compliant variants after %d attempts", MAX_COPY_RETRIES)
+    return None
+
+
 def generate_compliant_copy(*, case: Case, icp: ICP) -> CopyResult | None:
-    """Generate copy, re-prompt with the blocklist reason on failure. Returns None
-    if we can't get clean copy in MAX_COPY_RETRIES attempts."""
+    """Single-variant path (compat). Generate copy, re-prompt with the
+    blocklist reason on failure. Returns None after MAX_COPY_RETRIES."""
     history: list[list[compliance.PolicyFinding]] = []
     last_reason: str | None = None
 
@@ -111,48 +221,35 @@ def _cases_without_creative(s: Session) -> list[tuple[Case, ICP]]:
     return [(c, i) for (c, i) in rows]
 
 
-def _generate_one(s: Session, case: Case, icp: ICP) -> Creative | None:
-    # Copy
-    copy_result = generate_compliant_copy(case=case, icp=icp)
-    if copy_result is None:
-        # Record a rejected creative so we don't retry forever.
-        cr = Creative(
-            case_id=case.id,
-            icp_id=icp.id,
-            status=CreativeStatus.rejected,
-            policy_check={
-                "reason": "copy_blocklist_failed",
-                "attempts": MAX_COPY_RETRIES,
-                "findings": [
-                    [{"pattern": f.pattern, "match": f.match} for f in attempt]
-                    for attempt in []
-                ],
-            },
-        )
-        s.add(cr)
-        return None
-    copy = copy_result.copy
+def _make_creative_row(
+    *, case: Case, icp: ICP, copy: GeneratedCopy, copy_attempts: int
+) -> tuple[Creative, str | None]:
+    """Build a Creative row for one variant: copy + image.
 
-    # Image
-    image_prompt = render("image_prompt", case=case, icp=icp)
+    Video is skipped in MVP (see README §"Deferred"). To re-enable, uncomment
+    the Arcads block below and the poll_videos call in run_once. The DB
+    columns (video_s3_key, arcads_job_id, ai_disclosure_applied) are preserved
+    so re-enabling requires no migration.
+    """
+    # Image — angle-aware prompt.
+    image_prompt = render("image_prompt", case=case, icp=icp, angle=copy.angle)
+    image_key: str | None = None
     try:
         image_bytes = ideogram_client.generate(image_prompt, aspect_ratio="1x1")
         image_key = f"creatives/{uuid.uuid4()}.png"
         storage.put_bytes(image_key, image_bytes, "image/png")
     except Exception:
-        log.exception("image generation failed for case %s", case.id)
-        image_key = None
+        log.exception("image generation failed for case %s angle=%s", case.id, copy.angle)
 
-    # Video (async — we only submit here, poll_videos downloads it later)
-    video_script = f"{copy.headline}\n\n{copy.primary_text}"
-    try:
-        arcads_job_id = arcads_client.submit_video(
-            script=video_script,
-            watermark_text=compliance.AI_DISCLOSURE_TEXT,
-        )
-    except Exception:
-        log.exception("arcads submit failed for case %s", case.id)
-        arcads_job_id = None
+    # --- Video (deferred) ---
+    # video_script = f"{copy.headline}\n\n{copy.primary_text}"
+    # arcads_job_id: str | None = None
+    # try:
+    #     arcads_job_id = arcads_client.submit_video(
+    #         script=video_script, watermark_text=compliance.AI_DISCLOSURE_TEXT,
+    #     )
+    # except Exception:
+    #     log.exception("arcads submit failed for case %s angle=%s", case.id, copy.angle)
 
     cr = Creative(
         case_id=case.id,
@@ -162,24 +259,30 @@ def _generate_one(s: Session, case: Case, icp: ICP) -> Creative | None:
         cta=copy.cta,
         image_s3_key=image_key,
         video_s3_key=None,
-        arcads_job_id=arcads_job_id,
-        ai_disclosure_applied=False,  # flipped true when video finishes with disclosure
+        arcads_job_id=None,
+        # ai_disclosure_applied tracks the video-watermark step; with no video
+        # it's moot. The campaign deploy gate only fires when video_s3_key is
+        # set, so False here does not block image-only deploys.
+        ai_disclosure_applied=False,
         policy_check={
-            "copy_attempts": copy_result.attempts,
+            "copy_attempts": copy_attempts,
+            "angle": copy.angle,
             "rationale": copy.rationale,
         },
         status=CreativeStatus.pending_approval,
     )
-    s.add(cr)
-    s.flush()
+    return cr, image_key
 
-    # Post to Slack immediately with whatever we have; video URL gets added later.
+
+def _post_for_approval(cr: Creative, case: Case, image_key: str | None) -> None:
+    """Post a Slack approval message for the creative. Populates
+    cr.slack_message_ts on success."""
     try:
         image_url = storage.presign(image_key) if image_key else None
         ts = slack_client.post_creative_for_approval(
-            headline=copy.headline,
-            primary_text=copy.primary_text,
-            cta=copy.cta,
+            headline=f"[{(cr.policy_check or {}).get('angle', '?')}] {cr.headline}",
+            primary_text=cr.primary_text or "",
+            cta=cr.cta or "LEARN_MORE",
             image_url=image_url,
             video_url=None,
             case_title=case.title,
@@ -189,7 +292,37 @@ def _generate_one(s: Session, case: Case, icp: ICP) -> Creative | None:
     except Exception:
         log.exception("slack post failed for creative %s", cr.id)
 
-    return cr
+
+def _generate_variants(s: Session, case: Case, icp: ICP) -> list[Creative]:
+    """Generate AD_ANGLES-many variants for one case. One Claude call produces
+    all copies; image + video run per variant."""
+    variants_result = generate_compliant_variants(case=case, icp=icp)
+    if variants_result is None:
+        # Record a single rejected placeholder so we don't re-try the whole case.
+        placeholder = Creative(
+            case_id=case.id,
+            icp_id=icp.id,
+            status=CreativeStatus.rejected,
+            policy_check={
+                "reason": "copy_blocklist_failed",
+                "attempts": MAX_COPY_RETRIES,
+            },
+        )
+        s.add(placeholder)
+        return []
+
+    created: list[Creative] = []
+    for copy in variants_result.variants:
+        cr, image_key = _make_creative_row(
+            case=case, icp=icp, copy=copy, copy_attempts=variants_result.attempts
+        )
+        s.add(cr)
+        s.flush()
+        _post_for_approval(cr, case, image_key)
+        created.append(cr)
+
+    log.info("generated %d variants for case %s", len(created), case.id)
+    return created
 
 
 def generate_new() -> int:
@@ -199,8 +332,7 @@ def generate_new() -> int:
         created = 0
         for case, icp in pairs:
             try:
-                if _generate_one(s, case, icp) is not None:
-                    created += 1
+                created += len(_generate_variants(s, case, icp))
             except Exception:
                 log.exception("failed to generate creative for case %s", case.id)
         return created
@@ -284,18 +416,17 @@ def poll_approvals() -> tuple[int, int]:
 class CreativeRunResult:
     approvals_approved: int
     approvals_rejected: int
-    videos_downloaded: int
     new_creatives: int
 
 
 def run_once() -> CreativeRunResult:
+    # poll_videos() is intentionally not called in MVP — video generation is
+    # deferred (see _make_creative_row). The function is kept for re-enable.
     approved, rejected = poll_approvals()
-    videos = poll_videos()
     new_count = generate_new()
     result = CreativeRunResult(
         approvals_approved=approved,
         approvals_rejected=rejected,
-        videos_downloaded=videos,
         new_creatives=new_count,
     )
     log.info("creative run: %s", result)
@@ -307,7 +438,6 @@ def handler(_event: dict, _context: object) -> dict:
     return {
         "approved": r.approvals_approved,
         "rejected": r.approvals_rejected,
-        "videos_downloaded": r.videos_downloaded,
         "new_creatives": r.new_creatives,
     }
 
