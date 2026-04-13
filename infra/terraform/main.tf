@@ -89,7 +89,7 @@ resource "aws_db_subnet_group" "rds" {
 
 resource "aws_security_group" "rds" {
   name        = "${local.name_prefix}-rds"
-  description = "RDS access — publicly accessible for dev (password + SSL)"
+  description = "RDS access - publicly accessible for dev (password + SSL)"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -126,7 +126,7 @@ resource "aws_db_instance" "main" {
 }
 
 locals {
-  database_url = "postgresql+psycopg://${aws_db_instance.main.username}:${var.db_password}@${aws_db_instance.main.address}:${aws_db_instance.main.port}/${aws_db_instance.main.db_name}"
+  database_url = "postgresql+psycopg://${aws_db_instance.main.username}:${var.db_password}@${aws_db_instance.main.address}:${aws_db_instance.main.port}/${aws_db_instance.main.db_name}?sslmode=require"
 }
 
 ########################################################################
@@ -182,14 +182,15 @@ resource "aws_lambda_function" "ingest" {
   handler          = "agents.ingest.handler"
   timeout          = 300
   memory_size      = 512
-  filename         = var.lambda_package_path
-  source_code_hash = filebase64sha256(var.lambda_package_path)
+  s3_bucket        = aws_s3_bucket.artifacts.bucket
+  s3_key           = "lambda/suepercharge.zip"
 
   environment {
     variables = {
-      DATABASE_URL      = local.database_url
-      S3_BUCKET         = aws_s3_bucket.artifacts.bucket
-      ANTHROPIC_API_KEY = var.anthropic_api_key
+      DATABASE_URL   = local.database_url
+      S3_BUCKET      = aws_s3_bucket.artifacts.bucket
+      LLM_BACKEND    = "gemini"
+      GEMINI_API_KEY = var.gemini_api_key
     }
   }
 }

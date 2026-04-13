@@ -20,7 +20,7 @@ import os
 
 from pydantic import BaseModel, ValidationError
 
-_LLM_BACKEND = os.environ.get("LLM_BACKEND", "anthropic")
+_LLM_BACKEND = os.environ.get("LLM_BACKEND", "gemini")
 
 # ---------- Anthropic backend ----------
 
@@ -229,6 +229,59 @@ def _anthropic_structured[T: BaseModel](
     )
 
 
+# ---------- Gemini backend ----------
+
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_gemini_client = None
+
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+
+        _gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _gemini_client
+
+
+def _gemini_structured[T: BaseModel](
+    *,
+    prompt: str,
+    response_model: type[T],
+    system: str | None = None,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+) -> T:
+    """Call Gemini with JSON-schema structured output."""
+    from google.genai import types
+
+    client = _get_gemini_client()
+
+    contents = prompt
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        response_mime_type="application/json",
+        response_schema=response_model,
+    )
+
+    response = client.models.generate_content(
+        model=model if model and model.startswith("gemini") else _GEMINI_MODEL,
+        contents=contents,
+        config=config,
+    )
+
+    try:
+        data = json.loads(response.text)
+        return response_model.model_validate(data)
+    except (ValidationError, json.JSONDecodeError) as e:
+        raise StructuredOutputError(
+            f"Gemini returned invalid {response_model.__name__}: {e}\nRaw: {(response.text or '')[:500]}"
+        ) from e
+
+
 # ---------- Public API ----------
 
 
@@ -246,6 +299,15 @@ def structured[T: BaseModel](
 
     Backend is selected by `LLM_BACKEND` env var ("anthropic" or "ollama").
     """
+    if _LLM_BACKEND == "gemini":
+        return _gemini_structured(
+            prompt=prompt,
+            response_model=response_model,
+            system=system,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     if _LLM_BACKEND == "ollama":
         return _ollama_structured(
             prompt=prompt,

@@ -16,9 +16,10 @@ variable "db_password" {
   sensitive   = true
 }
 
-variable "anthropic_api_key" {
-  type      = string
-  sensitive = true
+variable "gemini_api_key" {
+  description = "Google Gemini API key from aistudio.google.com"
+  type        = string
+  sensitive   = true
 }
 
 variable "lambda_package_path" {
