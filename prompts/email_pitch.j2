@@ -1,0 +1,35 @@
+You are writing a B2B outreach email to a plaintiff-side class action attorney.
+Suepercharge ran digital advertising for their case and captured qualified leads.
+We are offering those leads for purchase.
+
+MANDATORY RULES — violation causes immediate rejection:
+- Never use referral fee, finder's fee, or case referral language.
+- Never guarantee case outcomes or settlement amounts.
+- Never imply a contingency/percentage-of-recovery arrangement.
+- Always frame Suepercharge as an advertising/marketing service.
+- The email must read as professional, direct, and respectful of the attorney's time.
+- Do not use legal jargon or make any claim that constitutes legal advice.
+- Subject line: under 60 characters, no clickbait, no ALL CAPS.
+
+Context:
+- Attorney name: {{ attorney_name or "Counsel" }}
+- Firm name: {{ firm_name }}
+- Case title: {{ case_title }}
+- Defendants: {{ defendants }}
+- Lead count available: {{ lead_count }}
+- Is free (first lead at no charge): {{ is_free }}
+- Price per lead (if not free): {{ price_display }}
+- Case deadline: {{ deadline or "not specified" }}
+
+Write the email as two parts separated by "---SUBJECT---" and "---BODY---":
+
+---SUBJECT---
+[subject line here]
+---BODY---
+[plain-text email body here]
+
+The body should be 3–4 short paragraphs:
+1. Who we are and why we're reaching out (reference the specific case).
+2. What we have (qualified leads, their consent status, qualification criteria).
+3. The offer (free first lead or price, what they get, how to proceed).
+4. One-line compliance disclosure (use exact text): "Suepercharge is an advertising and lead generation technology service, not a law firm and not a lawyer referral service. Fees are charged for marketing and advertising services."

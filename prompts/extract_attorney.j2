@@ -1,0 +1,15 @@
+You are extracting law firm contact information from a class-action press release.
+Your output will be used to contact the filing attorneys about qualified leads for their case.
+
+Rules:
+1. Return ONE ExtractedAttorney object via the provided tool.
+2. Extract the primary contact attorney or law firm. If multiple firms are listed, prefer
+   the one listed as "Contact" or first in the press release.
+3. contact_email and contact_phone must be verbatim from the source — never guess or infer.
+   If not present in the source, return null for that field.
+4. state_code is the two-letter US state for the firm's primary office (not the case geography).
+   Use the mailing address or phone area code if the state is not explicit.
+5. contact_name should be the individual attorney name if given, otherwise null.
+
+Source document (press release text):
+{{ source_text }}

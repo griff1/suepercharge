@@ -125,6 +125,51 @@ approve: ## List pending local approvals; see `scripts/approve.py --help`
 simulate-lead: ## Fire a fake Meta leadgen webhook at the handler
 	uv run scripts/simulate_lead.py
 
+.PHONY: enrichment
+enrichment: ## Run the enrichment agent once (extracts attorney contacts from cases)
+	uv run python -m agents.enrichment
+
+.PHONY: outreach
+outreach: ## Run the outreach agent once (stages actions for approval, executes approved ones)
+	uv run python -m agents.outreach
+
+.PHONY: approve-outreach
+approve-outreach: ## List pending outreach actions; approve with: make approve-outreach ID=<attempt_id>
+	@if [ -n "$(ID)" ]; then uv run scripts/approve_outreach.py "$(ID)"; \
+	else uv run scripts/approve_outreach.py; fi
+
+.PHONY: approve-outreach-all
+approve-outreach-all: ## Approve all pending outreach actions
+	uv run scripts/approve_outreach.py --all
+
+.PHONY: eval
+eval: ## Run the eval agent once (A/B analysis from CRM data + variant mutation)
+	uv run python -m agents.eval
+
+.PHONY: seed-variants
+seed-variants: ## Seed initial A/B prompt variants into local Postgres
+	uv run scripts/seed_variants.py
+
+.PHONY: test-elevenlabs
+test-elevenlabs: ## Test ElevenLabs API connectivity + agent config
+	@$(call loadenv) && uv run scripts/test_elevenlabs.py
+
+.PHONY: test-call
+test-call: ## Place a live test call — usage: make test-call PHONE=+15551234567
+	@$(call loadenv) && uv run scripts/test_elevenlabs.py --call "$(PHONE)"
+
+.PHONY: tracking
+tracking: ## Start local tracking webhook server (for ngrok)
+	uv run scripts/tracking_server.py
+
+.PHONY: scheduler
+scheduler: ## Run the scheduler with credit guardrails (enrichment+outreach+eval loop)
+	uv run scripts/scheduler.py
+
+.PHONY: scheduler-once
+scheduler-once: ## Run one scheduler tick then exit
+	uv run scripts/scheduler.py --once
+
 # ----- one-shot local pipeline demo (no keys required beyond Anthropic) -----
 
 # The creative agent needs two ticks for an approval to flow through:
@@ -180,6 +225,19 @@ test-meta: ## Test-deploy to Meta (PAUSED). Needs META_* in .env and LOCAL_STUB_
 	@echo ""
 	@echo "Check Ads Manager: https://business.facebook.com/adsmanager"
 	@echo "Look for a campaign named 'suepercharge/<case-uuid>' in PAUSED state."
+
+.PHONY: demo-outreach
+demo-outreach: ## CRM demo: seed -> enrich -> outreach (staged) -> approve -> execute
+	uv run scripts/seed_case.py
+	uv run scripts/seed_variants.py
+	uv run python -m agents.enrichment
+	uv run python -m agents.outreach
+	@echo ""
+	@echo "--- Outreach staged. Review pending actions: ---"
+	uv run scripts/approve_outreach.py
+	@echo ""
+	@echo "Approve with: make approve-outreach ID=<attempt_id>"
+	@echo "Then re-run:  make outreach"
 
 # ----- infra -----
 

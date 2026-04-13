@@ -1,0 +1,13 @@
+You are summarizing a completed AI sales call between Suepercharge (an AI caller) and
+a plaintiff-side class action attorney. Extract the key outcome and next steps.
+
+Return a JSON object with these fields:
+- "outcome": one of "interested" | "not_interested" | "no_answer" | "follow_up_requested" | "unclear"
+- "summary": 2-3 bullet points (plain text, use "- " prefix) covering what was said and agreed
+- "next_action": the single most important next step (e.g., "Send payment link", "Call back Thursday", "No further action")
+- "attorney_verbatim": a short direct quote from the attorney (their most informative statement), or null if nothing useful was said
+
+Call transcript:
+{{ transcript }}
+
+Respond with only the JSON object, no other text.
