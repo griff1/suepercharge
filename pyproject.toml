@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Autonomous legal lead-gen MVP: PR Newswire -> Meta ads -> lead capture"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.39.0",
     "boto3>=1.35.0",
     "facebook-business>=21.0.0",
     "feedparser>=6.0.11",
@@ -17,7 +16,6 @@ dependencies = [
     "alembic>=1.13.0",
     "beautifulsoup4>=4.14.3",
     "python-dotenv>=1.2.2",
-    "google-genai>=1.0.0",
 ]
 
 [dependency-groups]

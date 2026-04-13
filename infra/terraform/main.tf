@@ -182,15 +182,16 @@ resource "aws_lambda_function" "ingest" {
   handler          = "agents.ingest.handler"
   timeout          = 300
   memory_size      = 512
-  s3_bucket        = aws_s3_bucket.artifacts.bucket
-  s3_key           = "lambda/suepercharge.zip"
+  s3_bucket         = aws_s3_bucket.artifacts.bucket
+  s3_key            = "lambda/suepercharge.zip"
+  source_code_hash  = var.lambda_code_hash
 
   environment {
     variables = {
       DATABASE_URL   = local.database_url
       S3_BUCKET      = aws_s3_bucket.artifacts.bucket
-      LLM_BACKEND    = "gemini"
-      GEMINI_API_KEY = var.gemini_api_key
+      LLM_BACKEND  = "groq"
+      GROQ_API_KEY = var.groq_api_key
     }
   }
 }
